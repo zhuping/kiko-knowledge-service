@@ -1,0 +1,1 @@
+"""Catalog and knowledge module."""

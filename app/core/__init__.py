@@ -1,1 +1,1 @@
-"""Core infrastructure."""
+"""Application infrastructure."""

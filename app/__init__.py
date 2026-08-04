@@ -1,1 +1,1 @@
-"""Kiko curriculum knowledge service."""
+"""Kiko knowledge service."""

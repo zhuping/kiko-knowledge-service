@@ -1,6 +1,8 @@
 # kiko-knowledge-service
 
-课程知识底座后端：版本化教材知识包、可追溯题目判断和教研反馈闭环。
+# kiko-knowledge-service
+
+知识体系平台 V1 后端：五级知识树、通用知识对象、教材映射、发布快照和开放只读接口。
 
 ## 本地启动
 
@@ -14,26 +16,23 @@ make setup
 make dev
 ```
 
-`make setup` 会安装依赖，提示输入本机 MySQL `root` 密码，创建
-`kiko_knowledge` 数据库和本地 `kiko` 账号，再执行 Alembic 迁移。
-`make dev` 会同时启动 FastAPI、Celery Worker 和 Celery Beat；请先确保
-本机 MySQL 8 和 Redis 已启动。知识服务默认监听 `0.0.0.0:8001`，
-Swagger UI 地址为 `http://127.0.0.1:8001/docs`；临时换端口可运行
-`make dev PORT=端口号`。
+`make install` 安装依赖；生产/集成环境使用 MySQL 8，启动前配置
+`.env` 中的 `KIKO_KNOWLEDGE_DATABASE_URL`，再执行 `make db-init`。
+本地快速冒烟可以使用默认 SQLite，但不能代替 MySQL 事务和锁验收。
+`make dev` 启动 FastAPI，默认监听 `0.0.0.0:8001`，Swagger UI 地址为
+`http://127.0.0.1:8001/docs`。
 
 ```bash
 make db-init
-make test
+make dev
 ```
 
 ## 质量检查
 
 ```bash
-ruff check .
-ruff format --check .
+make lint
+make format-check
 make test
-pre-commit run --all-files
 ```
 
-API 文档：启动后访问 `/docs`；健康检查为 `/health/live` 和
-`/health/ready`。
+API 文档：启动后访问 `/docs`；健康检查为 `/healthz` 和 `/readyz`。

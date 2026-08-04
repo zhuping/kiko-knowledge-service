@@ -1,466 +1,339 @@
 # AGENT.md
 
-## 项目简介
+## 项目定位
 
-本项目是独立的课程知识底座后端服务，用于管理版本化教材知识包，并向当前产品及未来业务产品提供可追溯的题目归属判断能力。
+本仓库实现“乐学知低年级教育辅助 App——知识体系平台”V1.0 后端。它是内部知识内容管理与发布服务，为业务端提供已发布知识内容、教材映射、知识关系和政策规则依据。
 
-服务采用文档驱动开发。产品范围、领域边界、接口契约、数据模型和发布规则必须以本仓库的产品 PRD 与后端技术方案为依据，不能根据单个题目或单个调用方临时增加硬编码规则。
+当前 V1 以以下文档为准：
 
-首期目标架构是：
+- 产品范围、运营流程和交互语义：`docs/product/01-知识体系平台产品需求文档（PRD）.md`
+- 技术实现、接口、数据模型和实施顺序：`docs/backend/01-知识体系平台后端技术方案.md`
+- 知识体系平台接口契约文档：`docs/backend/02-知识体系平台接口契约文档.md`
 
-```text
-模块化单体 FastAPI
-  + 独立 MySQL
-  + Celery / Redis
-  + 独立管理 API 与客户端 API
-```
+后端技术方案对接口路径、字段、发布模型、任务执行和错误处理优先于 PRD 中的接口示例。文档与代码冲突时先确认最新决策并恢复一致，不要用现有代码的行为反推产品方案。
 
-## 快速导航
+## V1 范围
 
-| 你想做什么 | 去哪里看 |
-|---|---|
-| 了解产品定位、术语和业务流程 | `docs/product/01-课程知识底座产品PRD.md` |
-| 了解后端架构、数据模型和实施计划 | `docs/backend/01-课程知识底座后端技术方案.md` |
-| 了解当前产品后端接入约束 | 后端技术方案第 14～16 章 |
-| 了解管理 API 和 Client API | 后端技术方案第 12～13 章 |
-| 了解测试和质量门禁 | 后端技术方案第 18～19 章 |
-| 了解部署、配置和安全要求 | 后端技术方案第 20～24 章 |
-| 修改知识底座中后台 | 进入同级仓库 `../kiko-knowledge-admin/` 并先读其 `AGENT.md` |
-| 修改当前产品接入 | 进入同级仓库 `../kiko-backend/` 并先读其 `AGENT.md` |
+### 必须支持
 
-## 产品与服务边界
+- 人教版小学数学 2024 审定新版（六三制）一年级、二年级上下册；
+- 五级知识结构：领域、主题、单元、知识点组、原子知识点；
+- 通用知识对象、教材目录、教材映射、政策规则映射和知识关联；
+- 草稿编辑、Excel 批量导入、结构校验、发布批次、正式快照、版本预览、版本差异和回滚；
+- 内部运营后台接口；
+- 面向业务端的已发布内容只读接口；
+- MySQL 任务表驱动的导入、导出和发布校验任务；
+- 操作审计、AppKey/HMAC 鉴权、限流和接口契约测试。
 
-知识服务负责：
+### V1 不做
 
-- 教材知识包、课程目录和教学目标；
-- 教学目标关系、稳定 ID 和外部 ID 映射；
-- 原型题、边界题、反例、标准答案和标准解法；
-- 草稿、审核、发布、弃用和回滚；
-- 题目候选召回、受约束模型比较和程序校验；
-- 课程范围状态计算；
-- 判断反馈和教研审核；
-- 黄金测试集、发布门禁和审计；
-- Client App、API Key 和知识包访问权限。
+- 题库、OCR、题目最终知识点匹配、学生掌握度和推荐算法；
+- C 端用户功能或学习页面；
+- 复杂知识图谱可视化编辑；
+- 三年级以上或其他教材版本的首期内容；
+- 复杂多级审核流程；V1 只区分编辑者、发布者和管理员；
+- 微服务、分库分表、读写分离、搜索引擎、消息队列或 Redis/Celery；
+- 将 `supplement`、`未掌握` 或缺少匹配直接当成永久“超纲”结论。
 
-知识服务不负责：
+不要为了未来可能的题库同步、复杂审核或高并发提前建设抽象和基础设施。
 
-- 用户、孩子和学生档案；
-- 完整 OCR 和题目确认流程；
-- 学生掌握度和推荐策略；
-- 生成权限；
-- 错题、变式题生成和 PDF；
-- 当前产品页面或小程序流程；
-- 通用题库、组卷或计费平台。
+## 技术基线
 
-当前产品只能通过 HTTP API 调用知识服务。两个系统不得共享数据库、ORM Model、跨库外键或分布式事务。
+- Python 3.9；
+- FastAPI；
+- SQLAlchemy 2.x + Alembic；
+- PyMySQL + MySQL 8/InnoDB/`utf8mb4`；
+- Pydantic 请求/响应模型和领域服务校验；
+- openpyxl 仅用于 Excel 导入、导出和模板生成；
+- MySQL `job` 表 + 独立 worker；任务状态以数据库为准；
+- HTTPS 网关/Nginx → FastAPI，MySQL 独立部署。
 
-## 目标目录结构
+实现从本方案重新建立，不能为了迁就任何既有实现而恢复已删除的技术栈或业务边界。
 
-工程初始化后，代码按以下职责组织：
+## 代码结构和依赖方向
+
+推荐结构：
 
 ```text
 kiko-knowledge-service/
 ├── app/
 │   ├── main.py
-│   ├── celery_app.py
-│   ├── api/
-│   │   ├── http.py
-│   │   └── v1/
 │   ├── core/
-│   ├── domains/
+│   │   ├── config.py
+│   │   ├── db.py
+│   │   ├── auth.py
+│   │   ├── response.py
+│   │   └── errors.py
+│   ├── api/
+│   │   ├── admin.py
+│   │   └── open.py
+│   ├── modules/
 │   │   ├── catalog/
-│   │   ├── releases/
-│   │   ├── classification/
-│   │   ├── feedback/
-│   │   ├── access/
-│   │   ├── audit/
-│   │   └── gold_regression/
-│   ├── models/
-│   ├── providers/
-│   ├── repositories/
-│   ├── schemas/
-│   └── workers/
+│   │   ├── knowledge/
+│   │   ├── mapping/
+│   │   ├── relation/
+│   │   ├── release/
+│   │   ├── import_export/
+│   │   └── audit/
+│   └── jobs/
+│       ├── worker.py
+│       └── handlers.py
 ├── migrations/
 ├── scripts/
 ├── tests/
 │   ├── unit/
-│   ├── api/
 │   ├── integration/
-│   └── fixtures/
-├── docs/
-├── pyproject.toml
-├── alembic.ini
-└── Dockerfile
+│   └── contract/
+└── docs/
 ```
-
-该目录是职责指引，不要求为了匹配树形结构创建没有代码的空目录。
-
-## 开始工作前
-
-1. 阅读与任务相关的 PRD 和后端技术方案章节；
-2. 检查仓库实际结构和工作区状态；
-3. 搜索现有实现、调用方、测试、迁移和文档；
-4. 从 API 到 Service、Repository、Provider 或 Worker 追踪完整调用链；
-5. 确认修改是否影响管理中后台或当前产品 Provider；
-6. 选择能够解决根因的最小改动；
-7. 实现后执行与风险相称的测试和质量检查。
-
-不要只修改用户报告的表面路径。共享逻辑的问题应在所有调用方共同经过的正确边界修复。
-
-## 最小修改原则
-
-优先修改已有实现。
-
-不要：
-
-- 重写整个模块；
-- 创建第二套相同逻辑；
-- 为一个实现创建接口、工厂或 DI 容器；
-- 创建通用 BaseService 或通用 Repository；
-- 将一行转发包装成类；
-- 为首期引入微服务、Kafka、图数据库、向量数据库或工作流引擎；
-- 因单个数学题添加学科专属硬编码；
-- 在真实性能指标出现前替换既定技术方案。
-
-重复代码已经在两个以上真实场景出现时再提取公共能力。
-
-## Python 分层边界
 
 依赖方向固定为：
 
 ```text
-app/main.py
-  -> app/api/v1/
-    -> app/domains/*/service.py
-      -> app/repositories/、app/providers/、app/models/
+main → api → module service → repository → model/database
+                                      ↘ schema when needed
+jobs → module service
 ```
 
-必须遵守：
+规则：
 
-- `app/main.py` 只负责应用创建、生命周期、中间件和 Router 注册；
-- FastAPI Route Handler 只处理 HTTP 参数、依赖注入、调用 Service 和响应包装；
-- 业务规则、权限复核、状态迁移和事务提交放在领域 Service；
-- Repository 只负责查询、持久化和数据库锁，不提交事务；
-- Provider 只封装模型、对象存储和其他外部服务；
-- Worker 只接收稳定任务 ID，并调用 Runtime 或 Service；
-- Pydantic Schema 负责信任边界上的输入输出校验；
-- Service 不得导入 `app.main` 或 API Router；
-- Router 之间不得互相导入；
-- Worker、API 和脚本不得各自实现一套判断或发布逻辑。
+- `main.py` 只负责应用创建、生命周期和路由注册；
+- `api/admin.py`、`api/open.py` 只负责 HTTP 参数、鉴权依赖、调用 Service 和统一响应；
+- 业务规则、权限复核、状态迁移、快照构建和事务边界放在对应模块 Service；
+- Repository 只负责查询、持久化和数据库锁，不提交事务、不承载业务规则；
+- 每个业务模块只保留 `router`、`service`、`repository`、`schema`、`model` 五类职责；
+- `jobs` 只领取任务并调用已有 Service，不复制导入、校验或发布逻辑；
+- 不创建通用 Repository、BaseService、事件总线、复杂 DDD 框架或单实现工厂；
+- 模块不得直接操作其他模块的表，跨模块协作通过 Service 或明确的查询边界完成；
+- 数据库事务或行锁期间不得调用远端 HTTP、对象存储或其他慢外部服务。
 
-外部模型、OSS 和 HTTP 调用不得在数据库事务或行锁期间执行。
+## 领域和数据模型
 
-## 领域边界
+### 领域职责
 
-| 领域 | 职责 |
+| 模块 | 职责 |
 |---|---|
-| Catalog | 知识包、目录、目标、关系、样题、外部映射 |
-| Releases | 草稿克隆、完整性校验、审核、发布、回滚、弃用 |
-| Classification | 任务、候选召回、模型比较、范围计算、结果 |
-| Feedback | 调用方反馈、教研审核、知识缺口和候选动作 |
-| Access | 管理身份、RBAC、Client App、API Key、包权限 |
-| Audit | 关键编辑、审核、发布和密钥操作审计 |
-| Gold Regression | 黄金用例、指标计算和发布门禁 |
+| `catalog` | 教材版本、1～4 级目录节点和五级挂载 |
+| `knowledge` | 通用知识对象和独立词项 |
+| `mapping` | 教材映射、政策规则和政策映射 |
+| `relation` | 前置、后继、平行、交叉关系 |
+| `release` | 变更、发布批次、校验、正式快照、版本历史和回滚 |
+| `import_export` | Markdown/Excel 初始导入、Excel 预校验、导入导出任务 |
+| `audit` | 登录、编辑、导入、导出、停用、发布和回滚审计 |
 
-新增职责前先判断应归属哪个现有领域。不要以“方便调用”为由跨领域直接操作对方的数据表。
+### 五级结构
 
-## 业务不变量
+- 1～4 级存入 `catalog_node`，通过 `parent_id` 建立相邻层级父子关系；
+- 5 级存入 `catalog_knowledge_node`，只能挂到四级知识点组；
+- 目录节点属于教材版本/编辑空间；知识对象不等同于某一版本教材目录；
+- 同一个知识对象可映射多个教材位置，教材目录和通用知识对象通过映射连接。
 
-以下规则不能被前端校验、临时脚本或模型输出替代：
+### 核心表
 
-- MySQL 是知识内容、发布版本和判断任务状态的唯一事实来源；
-- Redis 和 Celery Result Backend 不是业务状态事实来源；
-- Published 版本不可 UPDATE 或 DELETE；
-- 回滚只切换当前发布版本，不修改或删除历史版本；
-- `logical_id` 跨版本稳定且永不复用；
-- 拆分、合并、替代和弃用必须保留关系与历史；
-- 每次判断冻结知识包、判断器、Prompt 和任务特征版本；
-- 模型只能从候选 ID 中选择，不能创建教学目标；
-- `scope_status` 由程序计算，不由模型自由判断；
-- `unmatched` 不等于 `later_scope`；
-- Counterexample 不能作为正向证据；
-- Evidence 必须经过调用方权限和教材授权过滤；
-- 低置信度结果不得自动确认为正式知识点；
-- 未审核反馈不得参与线上检索；
-- 接受反馈仍需经过知识包发布流程才能影响线上判断；
-- 当前产品最终的生成权限仍由当前产品后端决定。
+按技术方案维护以下模型：
 
-修改这些规则必须先更新设计文档、测试和相关状态说明。
+`content_space`、`textbook_edition`、`knowledge_object`、`knowledge_term`、`catalog_node`、`catalog_knowledge_node`、`textbook_mapping`、`knowledge_relation`、`policy_rule`、`knowledge_policy_mapping`、`change_log`、`release_batch`、`release_batch_item`、`release_version`、`release_current`、各类 `release_*` 快照表、`job`、`api_client`、`api_nonce`、`api_rate_bucket`、`audit_log`。
 
-## API 规则
+不要把别名、场景、方法、易错点或 `review_set` 建成新的 `canonical_id`；它们应作为词项、标签、集合或映射维护。
 
-统一规范：
+## 不可破坏的业务规则
 
-- API 前缀为 `/api/v1`；
-- 管理 API 位于 `/api/v1/admin`；
-- JSON 字段使用 `snake_case`；
-- 成功响应包含 `data` 和 `request_id`；
-- 错误响应包含 `error.code`、`error.message`、`error.details` 和 `request_id`；
-- 响应头包含 `X-Request-ID`；
-- 时间使用 ISO 8601 UTC；
-- 对外任务状态来自数据库；
-- 创建任务、反馈、导入和发布等写操作必须支持幂等；
-- 错误码是公共契约，不得用不稳定文案代替。
+### 稳定 ID和内容
 
-修改 API 时同步检查：
+- `canonical_id` 是跨教材稳定的全局知识对象 ID，创建后不可修改、不可复用；
+- ID 不包含出版社、年份、册次、单元顺序或教材路径；接口统一映射为 `canonicalId`，不得新增或使用 `knowledgeCode`；
+- 推荐格式为 `^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$`；名称、教材位置或发布版本变化不修改 ID；
+- 只有学习目标、数值范围或解法要求发生实质变化时才新建 ID，并保留关系；
+- 别名、核心关键词、衍生词使用数组或独立记录，不用逗号拼接字符串；
+- 正式版本只追加，不 UPDATE、不 DELETE；已引用内容只能停用/废弃并保留历史。
 
-- Route；
-- Request/Response Schema；
-- Domain Service；
-- OpenAPI 构建产物；
-- API 和契约测试；
-- `kiko-knowledge-admin` 的管理端调用；
-- `kiko-backend` 的 `KnowledgeServiceProvider`；
-- 版本兼容和发布顺序；
-- 对应文档。
+### 关系和映射
 
-跨仓库改动必须在各自仓库独立提交，不把其他仓库代码复制到本仓库。
+- `prerequisite` 只保存有方向的一条关系；`successors` 由反向查询计算，不单独落库；
+- `parallel`、`cross` 保存规范化的单条记录，查询时按两端返回；禁止自关联；
+- 前置关系必须无环；平行和交叉关系不按有向环处理；跨年级/跨学期关系必须有依据；
+- 启用知识对象至少有一条有效教材映射；同一知识对象、教材位置和映射类型不可重复；
+- 教材映射和政策规则映射独立维护，解除教材映射不能自动删除政策映射；
+- `scope=core/supplement` 用于组织、召回和展示，不直接等价于超纲；范围接口返回依据、规则版本和状态，由业务端完成最终业务判断。
 
-## 数据库与迁移
+### 草稿、发布和回滚
 
-修改数据库时同步更新：
+- 后台读写当前编辑空间；开放接口只读正式快照，绝不从草稿表拼装数据；
+- 草稿使用整数 `row_version` 乐观锁，冲突返回 `409`，禁止静默覆盖；
+- 草稿保存必须在同一事务写业务数据、词项/关系、`change_log` 和必要的 `audit_log`；
+- 发布批次只包含选中的变更；发布时校验 `selected_hash`，未选中的其他草稿不得混入；
+- 发布前检查层级、必填字段、ID、引用、映射、关系、摘要和快照一致性；错误阻止发布，风险需发布者确认；
+- 发布事务锁定唯一一行 `release_current`，复制基础正式快照、应用批次变更、计算 `content_hash`、写入新版本和快照，再更新 current 指针；
+- 发布失败整体回滚；正式版本生成后不可变；
+- 回滚不是修改旧版本，而是以历史正式快照创建新的 `rollback` 发布批次和新正式版本，中间版本、来源和审计链全部保留。
 
-- Alembic Migration；
-- SQLAlchemy Model；
-- Repository；
-- Pydantic Schema；
-- 索引和约束；
-- MySQL 集成测试；
-- 数据模型文档；
-- 必要的导入、导出和回滚方案。
+## 任务、幂等和并发
 
-必须遵守：
+- `job` 表是导入、导出、校验和发布任务的唯一业务状态来源；
+- worker 使用 MySQL 8 行锁领取任务，例如 `SELECT ... FOR UPDATE SKIP LOCKED`；领取后改为 `running`；
+- 任务处理器必须幂等，重复执行不得产生重复映射、版本或审计结果；
+- 任务失败支持有限次数重试和人工重试，超过次数进入 `failed` 并保留错误明细；
+- Excel 流程固定为：上传 → 大小/扩展名/MIME/表头校验 → 逐行业务预校验 → 错误报告 → 确认提交 → 整批事务写入；
+- 单次 Excel 最多 1000 行；预校验不写业务表，确认提交不允许部分成功；
+- 提交时校验文件摘要和编辑空间版本，防止重复提交或覆盖新修改；
+- worker 只传稳定任务 ID，不在 HTTP 请求中阻塞等待任务完成。
 
-- 生产数据库是独立 MySQL 8.0+；
-- SQLite 只用于快速单元测试，不作为 MySQL 行为验收依据；
-- 不创建跨服务外键；
-- Repository 不提交事务；
-- 关键状态变化和审计在同一事务完成；
-- 破坏性字段删除至少跨两个应用版本；
-- 不使用手工改库代替 Migration；
-- 不为没有查询依据的字段提前创建索引。
+Markdown 初始导入必须解析标题、表格、`canonical_id`、教材路径、前置关系和词项；按源文件摘要幂等执行。同一源文件不得重复导入，目标内容已被人工修改时必须停止并报告冲突。
 
-涉及索引和查询性能时，用真实 SQL 和 `EXPLAIN` 验证。
+## API 契约
 
-## 状态机与并发
+### 路径
 
-知识包版本状态：
+- 管理端：`/api/v1/admin/...`；
+- 开放端：`/api/v1/open/...`；
+- 健康检查：`/healthz`、`/readyz`；
+- API 长期引用使用 `canonicalId`，不使用内部目录 ID、教材路径或展示名称；
+- V1 的业务端接口只返回已发布内容；指定 `releaseVersion` 时读取对应历史正式快照。
+
+### 管理端核心接口
 
 ```text
-draft -> in_review -> published -> deprecated
-  ^          |
-  |          v
-  +------ rejected
+GET        /api/v1/admin/catalog/tree
+POST/PATCH /api/v1/admin/catalog/nodes
+POST       /api/v1/admin/catalog/nodes/{id}/move
+POST       /api/v1/admin/knowledge
+GET/PATCH  /api/v1/admin/knowledge/{canonicalId}
+POST       /api/v1/admin/imports
+GET        /api/v1/admin/jobs/{jobId}
+POST       /api/v1/admin/textbook-mappings/batch
+POST       /api/v1/admin/policy-mappings/batch
+POST       /api/v1/admin/relations/batch
+POST       /api/v1/admin/release-batches
+POST       /api/v1/admin/release-batches/{id}/validate
+POST       /api/v1/admin/release-batches/{id}/publish
+POST       /api/v1/admin/releases/{version}/rollback
+GET        /api/v1/admin/releases
+GET        /api/v1/admin/releases/{version}/diff
+GET        /api/v1/admin/audit-logs
 ```
 
-判断任务状态：
+### 开放端核心接口
 
 ```text
-received -> processing -> completed
-                      \-> needs_review
-                      \-> failed
+GET  /api/v1/open/knowledge/tree
+POST /api/v1/open/knowledge/search
+POST /api/v1/open/knowledge/details:batch
+GET  /api/v1/open/knowledge/{canonicalId}/relations
+GET  /api/v1/open/knowledge/filter
+POST /api/v1/open/scope:check
 ```
 
-状态迁移必须：
+### 字段、响应和错误
 
-- 由对应领域 Service 执行；
-- 校验当前状态和操作者权限；
-- 在事务内更新相关记录；
-- 写必要的审计日志；
-- 有单元测试和 API 测试；
-- 不允许 Route、Repository、Worker 或脚本直接绕过；
-- 不通过删除历史数据“回到上一状态”。
+- 数据库/内部 Python 字段使用 `snake_case`，API 字段使用 `camelCase`；
+- 数组保持 JSON 数组，不序列化成逗号字符串；时间以 UTC 存储并返回 ISO 8601；
+- 成功响应至少包含 `code`、`message`、`requestId`、`data`，查询响应携带 `releaseVersion`；
+- 分页默认 `pageNum=1`、`pageSize=10`，最大 `pageSize=100`；
+- 错误必须包含稳定业务码、可读消息、必要的详情和 `requestId`；批量错误包含行号/对象 ID、字段、原因和修复建议；
+- 重点错误码：`PARAM_INVALID`、`AUTH_FAILED`、`FORBIDDEN`、`NOT_FOUND`、`CONFLICT`、`VALIDATION_FAILED`、`RATE_LIMITED`、`INTERNAL_ERROR`、`SERVICE_UNAVAILABLE`；
+- 修改接口必须同步更新 Schema、Service、OpenAPI、契约测试和对应调用方；不复制其他仓库代码到本仓库。
 
-Draft 编辑使用整数 `lock_version` 乐观锁，冲突返回 `409`，不得静默覆盖。
+## 鉴权和安全
 
-## 异步任务与幂等
+### 管理端
 
-- `classification_task` 的数据库状态是唯一事实；
-- Celery 消息只传稳定 `task_id`；
-- Worker 开始工作前锁定并抢占任务；
-- 模型调用期间不持有数据库锁；
-- Worker 重复执行必须安全；
-- 消息投递失败后由维护任务扫描恢复；
-- 不依赖 Celery Result Backend 恢复任务；
-- 不在 HTTP 请求或 Worker 中使用阻塞 `sleep` 等待状态；
-- 重试必须有次数上限、超时和可观测错误；
-- Provider 失败不得伪造高置信度结果。
+- 优先接入公司 SSO/OIDC；服务只负责令牌校验和角色映射；
+- V1 角色为编辑者、发布者、管理员；路由依赖和领域 Service 都要校验权限；
+- 不使用前端按钮隐藏代替后端授权。
 
-关键幂等键：
+| 角色 | 允许操作 |
+|---|---|
+| 编辑者 | 草稿编辑、导入/导出、创建发布批次、发起校验 |
+| 发布者 | 编辑者全部权限，以及确认发布、创建回滚批次 |
+| 管理员 | 发布者全部权限，以及停用内容、版本管理和异常处理 |
 
-- 创建判断：`client_app_id + client_request_id`；
-- 判断结果：`task_id`；
-- 反馈：调用方 `feedback_request_id`；
-- 发布：`package_id + version`；
-- 导入：`package_version_id + source_hash`。
+### 开放端
 
-## 鉴权与安全
+请求头：
 
-Client API：
-
-- 使用高熵 API Key；
-- 只保存 Secret 的 HMAC/SHA-256 摘要；
-- 使用 constant-time compare；
-- 校验调用方状态、有效期、知识包权限和限流；
-- 日志只记录 `key_id`，绝不记录完整 Secret。
-
-管理 API：
-
-- 使用公司 SSO 或可信身份代理；
-- 管理身份 Header 只能由代理注入；
-- Service 层必须再次执行 RBAC；
-- 非 development 环境必须关闭本地测试身份；
-- 不能只依赖中后台隐藏按钮。
-
-媒体与模型：
-
-- 媒体 URL 默认只允许 HTTPS 和 Client App allowlist；
-- 禁止重定向、内网、localhost 和云元数据地址；
-- 设置连接超时、读取超时、大小和 MIME 限制；
-- 教材媒体使用私有 OSS 和最小授权；
-- 不向模型发送 API Secret、管理员信息或未授权教材原文；
-- 不记录完整模型响应、教材受限全文或个人敏感信息；
-- 所有 Secret 通过环境或 Secret Manager 注入，不进入代码和默认配置。
-
-环境变量统一使用 `KIKO_KNOWLEDGE_` 前缀。
-
-## 代码质量硬性要求
-
-所有新增或修改的 Python 代码必须：
-
-- 通过 `ruff check .`；
-- 通过 `ruff format --check .`，格式化时使用 `ruff format .`；
-- 通过 pytest；
-- 通过 pre-commit 提交钩子；
-- 总测试覆盖率不低于 80%；
-- 每个 Python 文件最多 500 行，包括空行和注释；
-- 对安全、状态机、事务、幂等和解析逻辑留下可运行测试。
-
-代码工程建立后，交付前至少执行：
-
-```bash
-ruff check .
-ruff format --check .
-pytest
-find app migrations scripts tests -name '*.py' -print0 | xargs -0 wc -l
+```text
+X-App-Key: app_xxx
+X-Timestamp: 1780000000
+X-Nonce: random-string
+X-Signature: base64(hmac_sha256(secret, canonical_request))
 ```
 
-如果命令或目录尚未建立，不得伪造执行结果；先完成与当前阶段相符的静态检查，并在交付说明中明确未执行项。
+签名原文固定为：
 
-发现文件超过 500 行时，按实际职责边界拆分。不得通过压缩代码、合并语句、删除必要注释或排除文件规避限制。
+```text
+HTTP_METHOD\n
+REQUEST_PATH\n
+SHA256(QUERY_STRING)\n
+SHA256(REQUEST_BODY)\n
+TIMESTAMP\n
+NONCE
+```
 
-## 测试要求
+服务端按顺序校验时间窗口（默认 ±300 秒）、AppKey 状态和权限、`(app_key, nonce)` 唯一性、HMAC 签名和请求参数。签名比较使用 constant-time compare。Secret 以加密形式保存，解密密钥来自部署密钥管理，不进入代码或日志。
 
-测试优先覆盖：
+限流优先由网关按 AppKey 执行，V1 基线为每分钟 1000 次；无网关时使用 MySQL 分钟桶兜底。高并发时再替换限流实现，不改变接口协议。
 
-- 知识包和判断状态机；
-- Published 不可变；
-- 目录和前置关系防环；
-- 版本克隆、发布和回滚事务；
-- `logical_id` 稳定性；
-- 任务规范化、召回评分和模型输出校验；
-- 范围状态和置信度门槛；
-- 幂等创建、Worker 重复执行和超时恢复；
-- API Key、RBAC 和授权过滤；
-- SSRF、媒体 URL 和教材版权边界；
-- OpenAPI 契约；
-- 当前产品 Provider 契约；
-- 第二套结构不同教材包的通用性。
+通用安全要求：
 
-数据库事务、锁、唯一约束和 MySQL 专属行为必须使用 MySQL 集成测试验证。
+- 所有传输使用 HTTPS；SQL 使用参数化查询；
+- 上传限制扩展名、MIME、大小、行数并使用随机文件名；
+- 导出文件使用短期下载地址并按权限控制；
+- 审计登录、编辑、映射、关系、停用、导入、导出、发布和回滚，包含操作者、对象、摘要、结果和 `requestId`；
+- 日志不得记录 Secret、完整签名、敏感请求体或敏感教材内容；
+- 数据库账号按迁移、读写和只读接口拆分最小权限。
 
-不要：
+## 测试和质量门禁
 
-- 删除或跳过失败测试来完成任务；
-- 只断言 HTTP 200 而不验证业务结果；
-- 用 SQLite 通过代替 MySQL 集成验收；
-- 为覆盖率编写没有行为价值的测试；
-- 为了通过测试降低业务约束。
+至少覆盖：
 
-## 跨仓库协作
+- `canonical_id` 格式、唯一性、稳定性和不可复用；
+- 五级父子关系、同层排序和前置关系成环检测；
+- 映射去重、政策映射独立性和发布前完整性校验；
+- 草稿乐观锁、批量导入整批提交/整批回滚；
+- 发布后开放接口只读新正式快照，未选草稿不混入；
+- 正式版本不可变，回滚生成新版本且历史版本不变；
+- MySQL 事务、唯一约束、行锁和 `SKIP LOCKED` 必须用 MySQL 8 集成测试；
+- HMAC、时间窗口、Nonce 重放、角色权限和限流；
+- OpenAPI 响应字段、`canonicalId`、数组、分页、错误码和历史 `releaseVersion` 查询；
+- 树查询、检索、批量详情和发布校验的性能基线：常规查询 P95 ≤ 500ms，条件检索 P95 ≤ 800ms；
+- 批量详情最多 100 个 `canonicalId`，Excel 单批最多 1000 行，发布校验单批最多 5000 个变更对象。
 
-| 仓库 | 与本服务的关系 |
+不要只断言 HTTP 200；不要用 SQLite 代替 MySQL 事务、锁和约束验收；不要删除失败测试或降低业务约束来通过检查。提交前运行仓库已配置的格式、静态检查、单元测试、集成测试和契约测试，并明确未执行项。
+
+## 文档同步规则
+
+| 变更 | 必须同步 |
 |---|---|
-| `kiko-knowledge-admin` | 通过管理 API 建设、审核和发布知识包 |
-| `kiko-backend` | 通过 Client API 提交判断、轮询结果和反馈 |
-| `kiko-weapp` | 只访问当前产品后端，不直接访问知识服务 |
+| 产品范围、层级或流程 | PRD、后端方案、测试 |
+| API 路径、字段、枚举、错误码 | OpenAPI、Schema、调用方、契约测试 |
+| 表、字段、索引或约束 | Alembic Migration、模型、数据文档、MySQL 集成测试 |
+| 状态机、发布或回滚 | Service、快照/审计逻辑、测试 |
+| 鉴权、Secret、限流或审计 | 配置、部署说明、安全测试 |
+| 导入格式或数据校验 | 模板、脚本、错误报告和回归数据 |
 
-修改公共契约前先搜索真实调用方。
+## 禁止行为
 
-- 管理 API 变化要评估 `kiko-knowledge-admin`；
-- Client API 变化要评估 `kiko-backend`；
-- 不要求小程序保存知识服务 API Key；
-- 知识服务故障不能阻断当前产品保存题目；
-- 跨服务一致性使用幂等键、结果快照、重试查询和最终一致性；
-- 不引入分布式事务。
+- 以题目样例或单个调用方为依据增加业务硬编码；
+- 把教材路径、名称或 `knowledgeCode` 当作长期知识对象 ID；
+- 把五级原子知识点直接塞进四级目录表，或建立跨层级父子关系；
+- 让开放接口读取草稿，或修改已发布快照；
+- 通过修改旧版本实现回滚，或删除中间版本和审计记录；
+- 让未确认的导入部分写入数据库；
+- 让 worker、脚本和 API 各自实现一套发布/校验逻辑；
+- 恢复 Celery、Redis、消息队列、搜索引擎或微服务拆分，除非新的技术方案明确批准；
+- 在事务或行锁期间调用外部服务；
+- 把模型、前端校验或缓存状态当作业务事实来源；
+- 记录 Secret、完整签名、敏感请求参数或未授权教材内容；
+- 修改公共契约、数据库或状态机而不更新文档、迁移和测试。
 
-## 文档同步
+## 开发流程
 
-修改以下内容时必须同步文档：
+1. 先阅读本文件及与任务相关的 PRD、后端方案章节；
+2. 明确任务属于哪个模块，并确认没有扩大 V1 范围；
+3. 追踪完整调用链和所有调用方，优先复用已有模块能力；
+4. 在正确的 Service/Repository/事务边界修改根因，保持最小 diff；
+5. 对状态、事务、鉴权、导入和发布逻辑补最小可运行测试；
+6. 同步 OpenAPI、Migration、文档和契约测试；
+7. 执行与风险相称的质量检查，交付时说明未执行项和兼容影响。
 
-| 修改内容 | 至少同步 |
-|---|---|
-| 产品范围或业务流程 | 产品 PRD、后端方案、测试 |
-| API 字段、枚举或错误码 | OpenAPI、调用方、契约测试 |
-| 数据模型或索引 | Migration、模型章节、集成测试 |
-| 状态机 | 状态说明、Service、调用方、测试 |
-| 判断规则或门槛 | 判断架构、classifier 版本、黄金集 |
-| 发布门禁 | 发布流程、回归指标、审核页面契约 |
-| 配置或 Secret | 配置表、部署说明、环境示例 |
-
-文档和代码冲突时不要自行选择对自己最方便的一方。先查清最新决策，再让两者恢复一致。
-
-## Forbidden Behaviors
-
-禁止：
-
-- 不阅读产品 PRD 和后端方案直接开发；
-- 擅自扩大首期范围；
-- 为单个题目增加一次性判断补丁；
-- 将教材样题退化为简单关键词标签；
-- 让模型创建目标 ID 或自由判断课程范围；
-- 将未匹配直接判定为超范围；
-- 修改 Published 内容或删除历史判断；
-- 让未审核反馈直接进入线上知识库；
-- 绕过状态机、Service、Repository 或统一 API；
-- 在数据库事务中调用模型、OSS 或远端 HTTP；
-- 使用 Celery 状态代替数据库业务状态；
-- 修改 API 不同步 OpenAPI、调用方和测试；
-- 修改数据库不更新 Migration；
-- 引入未经设计的新技术栈；
-- 重复实现已有能力；
-- 提交临时调试代码、Secret 或敏感数据；
-- 使用不安全的媒体 URL 抓取；
-- 删除失败测试或降低业务约束；
-- 提交未通过 Ruff、pytest 或格式化校验的代码；
-- 创建或保留超过 500 行的 Python 文件。
-
-## Guiding Principles
-
-始终遵循：
-
-1. 文档优先于代码；
-2. 教材证据优先于表面特征；
-3. 稳定 ID 和版本可追溯优先于短期便利；
-4. 确定性校验优先于模型自由输出；
-5. 数据库业务状态优先于任务框架状态；
-6. 权限和版权边界不能由前端代替；
-7. 复用优先于重写；
-8. 最小修改优先于大规模重构；
-9. 测试和黄金集是判断与发布的质量门禁；
-10. 新教材接入应通过数据配置完成，而不是修改核心代码。
-
-## 交付检查
-
-提交结果前确认：
-
-- 修改位于正确仓库和正确领域；
-- 产品与服务边界未被扩大；
-- 没有创建重复实现或不必要抽象；
-- API、Schema、OpenAPI、调用方和测试保持一致；
-- Migration、Model、Repository 和文档保持一致；
-- 状态迁移、事务、幂等和审计完整；
-- 权限、Secret、SSRF 和版权边界未退化；
-- 相关测试和质量命令已执行；
-- 未执行的检查已明确说明；
-- 工作区中用户原有改动未被覆盖。
+最短可行实现优先：不为单一实现添加抽象，不为未来场景预留空模块，不重复建设已有能力。

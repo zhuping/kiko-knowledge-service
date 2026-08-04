@@ -1,59 +1,74 @@
-from __future__ import annotations
-
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .base import Base, IdMixin, TimestampMixin
+from app.models.base import Base, TimestampMixin
 
 
-class GoldTestCase(IdMixin, TimestampMixin, Base):
-    __tablename__ = "gold_test_cases"
+class Job(TimestampMixin, Base):
+    __tablename__ = "job"
 
-    package_id: Mapped[str] = mapped_column(ForeignKey("curriculum_packages.id"))
-    question_json: Mapped[dict] = mapped_column(JSON)
-    scope_context_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    expected_json: Mapped[dict] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String(16), default="active")
-
-
-class RegressionRun(IdMixin, Base):
-    __tablename__ = "regression_runs"
-
-    package_version_id: Mapped[str] = mapped_column(ForeignKey("package_versions.id"))
-    classifier_version: Mapped[str] = mapped_column(String(64))
-    metrics_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    passed: Mapped[Optional[bool]] = mapped_column(Boolean)
-    started_at: Mapped[datetime] = mapped_column(DateTime)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    error_file: Mapped[Optional[str]] = mapped_column(String(500))
+    last_error: Mapped[Optional[str]] = mapped_column(String(1000))
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
-class ImportJob(IdMixin, TimestampMixin, Base):
-    __tablename__ = "import_jobs"
+class ApiClient(TimestampMixin, Base):
+    __tablename__ = "api_client"
 
-    package_version_id: Mapped[str] = mapped_column(ForeignKey("package_versions.id"))
-    source_hash: Mapped[str] = mapped_column(String(64))
-    storage_key: Mapped[Optional[str]] = mapped_column(String(512))
-    status: Mapped[str] = mapped_column(String(16), default="validated")
-    preview_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    errors_json: Mapped[Optional[list]] = mapped_column(JSON)
-    payload_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    created_by: Mapped[str] = mapped_column(String(128))
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    secret_ciphertext: Mapped[str] = mapped_column(String(512), nullable=False)
+    allowed_scopes: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    rate_limit_per_minute: Mapped[int] = mapped_column(
+        Integer, default=1000, nullable=False
+    )
+    last_rotated_at: Mapped[Optional[datetime]] = mapped_column()
 
-    __table_args__ = (UniqueConstraint("package_version_id", "source_hash"),)
+
+class ApiNonce(Base):
+    __tablename__ = "api_nonce"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    __table_args__ = (UniqueConstraint("app_key", "nonce"),)
 
 
-class AuditLog(IdMixin, Base):
-    __tablename__ = "audit_logs"
+class ApiRateBucket(Base):
+    __tablename__ = "api_rate_bucket"
 
-    actor_type: Mapped[str] = mapped_column(String(24))
-    actor_id: Mapped[str] = mapped_column(String(128))
-    action: Mapped[str] = mapped_column(String(64))
-    resource_type: Mapped[str] = mapped_column(String(64))
-    resource_id: Mapped[str] = mapped_column(String(26))
-    before_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    after_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    request_id: Mapped[Optional[str]] = mapped_column(String(26))
-    created_at: Mapped[datetime] = mapped_column(DateTime)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    __table_args__ = (UniqueConstraint("app_key", "bucket_minute"),)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    entity_type: Mapped[Optional[str]] = mapped_column(String(40))
+    entity_key: Mapped[Optional[str]] = mapped_column(String(128))
+    summary: Mapped[Optional[str]] = mapped_column(String(1000))
+    result: Mapped[str] = mapped_column(String(20), default="success", nullable=False)
+    request_id: Mapped[Optional[str]] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(nullable=False)

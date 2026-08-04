@@ -1,218 +1,200 @@
-from __future__ import annotations
+from typing import Any, Optional
 
-from datetime import datetime
-from typing import Optional, Union
-
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    DateTime,
-    ForeignKey,
-    Index,
-    Integer,
-    SmallInteger,
-    String,
-    Text,
-    UniqueConstraint,
-)
+from sqlalchemy import JSON, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .base import Base, IdMixin, TimestampMixin
+from app.models.base import Base, TimestampMixin
 
 
-class CurriculumPackage(IdMixin, TimestampMixin, Base):
-    __tablename__ = "curriculum_packages"
+class ContentSpace(TimestampMixin, Base):
+    __tablename__ = "content_space"
 
-    code: Mapped[str] = mapped_column(String(96), unique=True)
-    subject_code: Mapped[str] = mapped_column(String(32))
-    grade: Mapped[int] = mapped_column(SmallInteger)
-    semester: Mapped[str] = mapped_column(String(16))
-    edition: Mapped[str] = mapped_column(String(128))
-    publisher: Mapped[Optional[str]] = mapped_column(String(128))
-    curriculum_standard: Mapped[Optional[str]] = mapped_column(String(128))
-    region_json: Mapped[Optional[list]] = mapped_column(JSON)
-    current_release_id: Mapped[Optional[str]] = mapped_column(String(26))
-    status: Mapped[str] = mapped_column(String(20), default="active")
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
 
+
+class TextbookEdition(TimestampMixin, Base):
+    __tablename__ = "textbook_edition"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    edition_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    edition_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    subject: Mapped[str] = mapped_column(String(50), default="数学", nullable=False)
+    school_system: Mapped[str] = mapped_column(
+        String(20), default="六三制", nullable=False
+    )
+    version_year: Mapped[int] = mapped_column(Integer, default=2024, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+
+
+class KnowledgeObject(TimestampMixin, Base):
+    __tablename__ = "knowledge_object"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    canonical_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    grade_term: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False)
+    cognitive_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    importance: Mapped[str] = mapped_column(String(20), nullable=False)
+    exercise_signature: Mapped[Optional[str]] = mapped_column(Text)
+    solution_feature: Mapped[Optional[str]] = mapped_column(String(1000))
+    scene_feature: Mapped[Optional[str]] = mapped_column(String(1000))
+    numeric_feature: Mapped[Optional[str]] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    row_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(128))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(128))
+
+
+class KnowledgeTerm(TimestampMixin, Base):
+    __tablename__ = "knowledge_term"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    knowledge_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_object.id"), nullable=False
+    )
+    term_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    term: Mapped[str] = mapped_column(String(200), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     __table_args__ = (
-        Index(
-            "ix_packages_subject_grade_semester_status",
-            "subject_code",
-            "grade",
-            "semester",
-            "status",
-        ),
+        UniqueConstraint("knowledge_id", "term_type", "term"),
+        Index("ix_knowledge_term_search", "term", "term_type", "knowledge_id"),
     )
 
 
-class PackageVersion(IdMixin, TimestampMixin, Base):
-    __tablename__ = "package_versions"
+class CatalogNode(TimestampMixin, Base):
+    __tablename__ = "catalog_node"
 
-    package_id: Mapped[str] = mapped_column(
-        ForeignKey("curriculum_packages.id"), index=True
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(
+        ForeignKey("content_space.id"), nullable=False
     )
-    version: Mapped[str] = mapped_column(String(32))
-    status: Mapped[str] = mapped_column(String(20), default="draft")
-    based_on_version_id: Mapped[Optional[str]] = mapped_column(
-        ForeignKey("package_versions.id")
+    edition_id: Mapped[int] = mapped_column(
+        ForeignKey("textbook_edition.id"), nullable=False
     )
-    release_notes: Mapped[Optional[str]] = mapped_column(Text)
-    benchmark_result_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    created_by: Mapped[str] = mapped_column(String(128))
-    reviewed_by: Mapped[Optional[str]] = mapped_column(String(128))
-    published_by: Mapped[Optional[str]] = mapped_column(String(128))
-    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    lock_version: Mapped[int] = mapped_column(Integer, default=1)
-
-    __table_args__ = (UniqueConstraint("package_id", "version"),)
-
-
-class CurriculumNode(IdMixin, TimestampMixin, Base):
-    __tablename__ = "curriculum_nodes"
-
-    logical_id: Mapped[str] = mapped_column(String(26))
-    package_version_id: Mapped[str] = mapped_column(
-        ForeignKey("package_versions.id"), index=True
+    parent_id: Mapped[Optional[int]] = mapped_column(ForeignKey("catalog_node.id"))
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    row_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    __table_args__ = (
+        Index("ix_catalog_tree", "space_id", "edition_id", "parent_id", "sort_order"),
     )
-    parent_id: Mapped[Optional[str]] = mapped_column(ForeignKey("curriculum_nodes.id"))
-    node_type: Mapped[str] = mapped_column(String(24))
-    code: Mapped[str] = mapped_column(String(96))
-    name: Mapped[str] = mapped_column(String(128))
-    order_no: Mapped[int] = mapped_column(Integer)
-    source_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String(16), default="active")
-    lock_version: Mapped[int] = mapped_column(Integer, default=1)
 
+
+class CatalogKnowledgeNode(TimestampMixin, Base):
+    __tablename__ = "catalog_knowledge_node"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(
+        ForeignKey("content_space.id"), nullable=False
+    )
+    group_node_id: Mapped[int] = mapped_column(
+        ForeignKey("catalog_node.id"), nullable=False
+    )
+    knowledge_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_object.id"), nullable=False
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    row_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    __table_args__ = (UniqueConstraint("space_id", "group_node_id", "knowledge_id"),)
+
+
+class TextbookMapping(TimestampMixin, Base):
+    __tablename__ = "textbook_mapping"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(
+        ForeignKey("content_space.id"), nullable=False
+    )
+    edition_id: Mapped[int] = mapped_column(
+        ForeignKey("textbook_edition.id"), nullable=False
+    )
+    knowledge_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_object.id"), nullable=False
+    )
+    catalog_node_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("catalog_node.id")
+    )
+    textbook_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    mapping_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    alignment_type: Mapped[str] = mapped_column(
+        String(20), default="equivalent", nullable=False
+    )
+    edition_label: Mapped[Optional[str]] = mapped_column(String(200))
+    edition_keywords: Mapped[list[Any]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    page_start: Mapped[Optional[int]] = mapped_column(Integer)
+    page_end: Mapped[Optional[int]] = mapped_column(Integer)
+    evidence: Mapped[Optional[str]] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     __table_args__ = (
         UniqueConstraint(
-            "package_version_id", "logical_id", name="uq_nodes_version_logical"
-        ),
-        UniqueConstraint(
-            "package_version_id",
-            "parent_id",
-            "order_no",
-            name="uq_nodes_version_parent_order",
+            "space_id", "edition_id", "knowledge_id", "textbook_path", "mapping_type"
         ),
     )
 
 
-class Objective(IdMixin, TimestampMixin, Base):
-    __tablename__ = "objectives"
+class KnowledgeRelation(TimestampMixin, Base):
+    __tablename__ = "knowledge_relation"
 
-    logical_id: Mapped[str] = mapped_column(String(26))
-    package_version_id: Mapped[str] = mapped_column(
-        ForeignKey("package_versions.id"), index=True
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(
+        ForeignKey("content_space.id"), nullable=False
     )
-    node_id: Mapped[str] = mapped_column(ForeignKey("curriculum_nodes.id"))
-    code: Mapped[str] = mapped_column(String(96))
-    name: Mapped[str] = mapped_column(String(128))
-    definition: Mapped[str] = mapped_column(Text)
-    attainment: Mapped[str] = mapped_column(Text)
-    required_concepts_json: Mapped[list] = mapped_column(JSON, default=list)
-    required_actions_json: Mapped[list] = mapped_column(JSON, default=list)
-    allowed_variations_json: Mapped[list] = mapped_column(JSON, default=list)
-    exclusions_json: Mapped[list] = mapped_column(JSON, default=list)
-    match_hints_json: Mapped[Optional[list]] = mapped_column(JSON)
-    source_json: Mapped[dict] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String(16), default="active")
-    lock_version: Mapped[int] = mapped_column(Integer, default=1)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "package_version_id",
-            "logical_id",
-            name="uq_objectives_version_logical",
-        ),
-        UniqueConstraint(
-            "package_version_id", "code", name="uq_objectives_version_code"
-        ),
-        Index(
-            "ix_objectives_version_node_status",
-            "package_version_id",
-            "node_id",
-            "status",
-        ),
+    from_knowledge_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_object.id"), nullable=False
     )
-
-
-class ObjectiveRelation(IdMixin, Base):
-    __tablename__ = "objective_relations"
-
-    package_version_id: Mapped[str] = mapped_column(
-        ForeignKey("package_versions.id"), index=True
+    to_knowledge_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_object.id"), nullable=False
     )
-    source_objective_id: Mapped[str] = mapped_column(ForeignKey("objectives.id"))
-    target_objective_id: Mapped[str] = mapped_column(ForeignKey("objectives.id"))
-    relation_type: Mapped[str] = mapped_column(String(24))
-    is_required: Mapped[bool] = mapped_column(Boolean, default=True)
-    metadata_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime)
+    relation_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    edition_id: Mapped[Optional[int]] = mapped_column(ForeignKey("textbook_edition.id"))
+    basis: Mapped[Optional[str]] = mapped_column(String(1000))
+    note: Mapped[Optional[str]] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint(
-            "package_version_id",
-            "source_objective_id",
-            "target_objective_id",
-            "relation_type",
-        ),
+
+class PolicyRule(TimestampMixin, Base):
+    __tablename__ = "policy_rule"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rule_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[Optional[str]] = mapped_column(String(500))
+    applicable_grade: Mapped[Optional[str]] = mapped_column(String(100))
+    condition_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
     )
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    __table_args__ = (UniqueConstraint("rule_code", "rule_version"),)
 
 
-class Exemplar(IdMixin, TimestampMixin, Base):
-    __tablename__ = "exemplars"
+class KnowledgePolicyMapping(TimestampMixin, Base):
+    __tablename__ = "knowledge_policy_mapping"
 
-    logical_id: Mapped[str] = mapped_column(String(26))
-    package_version_id: Mapped[str] = mapped_column(
-        ForeignKey("package_versions.id"), index=True
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(
+        ForeignKey("content_space.id"), nullable=False
     )
-    exemplar_type: Mapped[str] = mapped_column(String(24))
-    source_type: Mapped[str] = mapped_column(String(24))
-    source_json: Mapped[dict] = mapped_column(JSON)
-    question_text: Mapped[str] = mapped_column(Text)
-    options_json: Mapped[Optional[list]] = mapped_column(JSON)
-    answer_json: Mapped[Optional[Union[dict, list, str]]] = mapped_column(JSON)
-    solution_text: Mapped[Optional[str]] = mapped_column(Text)
-    task_signature_json: Mapped[dict] = mapped_column(JSON)
-    media_json: Mapped[Optional[list]] = mapped_column(JSON)
-    display_level: Mapped[str] = mapped_column(String(16), default="reference")
-    status: Mapped[str] = mapped_column(String(16), default="active")
-    lock_version: Mapped[int] = mapped_column(Integer, default=1)
-
-    __table_args__ = (
-        UniqueConstraint("package_version_id", "logical_id"),
-        Index(
-            "ix_exemplars_version_type_status",
-            "package_version_id",
-            "exemplar_type",
-            "status",
-        ),
+    knowledge_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_object.id"), nullable=False
     )
-
-
-class ExemplarObjective(IdMixin, Base):
-    __tablename__ = "exemplar_objectives"
-
-    exemplar_id: Mapped[str] = mapped_column(ForeignKey("exemplars.id"), index=True)
-    objective_id: Mapped[str] = mapped_column(ForeignKey("objectives.id"), index=True)
-    role: Mapped[str] = mapped_column(String(16))
-    created_at: Mapped[datetime] = mapped_column(DateTime)
-
-    __table_args__ = (UniqueConstraint("exemplar_id", "objective_id", "role"),)
-
-
-class ObjectiveExternalMapping(IdMixin, Base):
-    __tablename__ = "objective_external_mappings"
-
-    package_version_id: Mapped[str] = mapped_column(
-        ForeignKey("package_versions.id"), index=True
+    policy_rule_id: Mapped[int] = mapped_column(
+        ForeignKey("policy_rule.id"), nullable=False
     )
-    objective_id: Mapped[str] = mapped_column(ForeignKey("objectives.id"), index=True)
-    namespace: Mapped[str] = mapped_column(String(64))
-    external_id: Mapped[str] = mapped_column(String(128))
-    metadata_json: Mapped[Optional[dict]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime)
-
-    __table_args__ = (
-        UniqueConstraint("package_version_id", "namespace", "external_id"),
+    applicable_condition: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
     )
+    basis: Mapped[Optional[str]] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    __table_args__ = (UniqueConstraint("space_id", "knowledge_id", "policy_rule_id"),)

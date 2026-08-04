@@ -1,49 +1,81 @@
-from contextlib import asynccontextmanager
+from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from uuid import uuid4
 
-from app.api.http import install_http, ok
-from app.api.v1.router import router
-from app.core.config import settings
-from app.core.database import check_database, engine
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
+
+from app.api.admin import router as admin_router
+from app.api.open import router as open_router
+from app.core.config import Settings
+from app.core.db import create_database_engine
+from app.core.errors import BusinessError
+from app.core.response import failure
 from app.models import Base
 
 
-@asynccontextmanager
-async def lifespan(_app):
-    if settings.environment == "development":
+def create_app(database_url: str | None = None, create_schema: bool = False) -> FastAPI:
+    settings = Settings()
+    if database_url:
+        settings.database_url = database_url
+    engine = create_database_engine(settings.database_url)
+    if create_schema:
         Base.metadata.create_all(engine)
-    yield
-
-
-def create_app() -> FastAPI:
-    application = FastAPI(
-        title="Kiko Curriculum Knowledge Service",
-        version="0.1.0",
-        description="版本化教材知识包、可追溯题目判断与反馈审核 API。",
-        lifespan=lifespan,
+    app = FastAPI(title="Kiko Knowledge Service", version="1.0.0")
+    app.state.settings = settings
+    app.state.engine = engine
+    app.state.session_factory = sessionmaker(
+        bind=engine, autoflush=False, expire_on_commit=False
     )
-    if settings.environment == "development":
-        application.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        request.state.request_id = request.headers.get(
+            "X-Request-ID", f"req_{uuid4().hex}"
         )
-    install_http(application)
-    application.include_router(router)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
 
-    @application.get("/health/live", tags=["health"])
-    def live():
-        return ok({"status": "ok"})
+    @app.exception_handler(BusinessError)
+    async def business_error_handler(request: Request, exc: BusinessError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=failure(
+                exc.code, exc.message, request.state.request_id, exc.details
+            ),
+        )
 
-    @application.get("/health/ready", tags=["health"])
-    def ready():
-        check_database()
-        return ok({"status": "ready", "database": "ok"})
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=400,
+            content=failure(
+                "PARAM_INVALID", "请求参数无效", request.state.request_id, exc.errors()
+            ),
+        )
 
-    return application
+    @app.get("/healthz", tags=["system"])
+    def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz", tags=["system"])
+    def readyz():
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except Exception as exc:  # pragma: no cover - depends on external DB
+            return JSONResponse(
+                status_code=503, content={"status": "not_ready", "error": str(exc)}
+            )
+        return {"status": "ready"}
+
+    app.include_router(admin_router)
+    app.include_router(open_router)
+    return app
 
 
 app = create_app()

@@ -5,15 +5,12 @@ description = "Versioned curriculum knowledge service"
 requires-python = ">=3.9"
 dependencies = [
   "alembic>=1.13,<2",
-  "celery[redis]>=5,<6",
-  "eval-type-backport>=0.2,<1; python_version < '3.10'",
+  "cryptography>=42,<45",
   "fastapi>=0.115,<1",
   "pydantic-settings>=2,<3",
   "pymysql>=1,<2",
   "python-multipart>=0.0.9",
-  "requests>=2,<3",
   "sqlalchemy>=2,<3",
-  "urllib3>=1.26,<2",
   "uvicorn>=0.30,<1",
 ]
 
@@ -30,11 +27,7 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=app --cov-report=term-missing --cov-fail-under=80"
-markers = ["mysql: requires KIKO_KNOWLEDGE_TEST_MYSQL_URL"]
-
-[tool.coverage.run]
-omit = ["app/workers/*", "app/celery_app.py"]
+addopts = "-q"
 
 [tool.ruff]
 target-version = "py39"

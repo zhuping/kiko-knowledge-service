@@ -1,114 +1,162 @@
-from __future__ import annotations
-
+import base64
 import hashlib
 import hmac
-import secrets
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
 
-from fastapi import Depends, Header
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi import Depends, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.core.database import DbSession
-from app.core.errors import ApiError
-from app.core.time import utcnow
-from app.models import AdminUser, AdminUserRole, ClientApp
-
-ALL_ROLES = {"viewer", "editor", "reviewer", "publisher", "admin"}
+from app.core.config import Settings
+from app.core.db import get_db
+from app.core.errors import BusinessError
+from app.models.base import utc_now
+from app.models.operations import ApiClient, ApiNonce, ApiRateBucket
 
 
 @dataclass(frozen=True)
-class AdminContext:
-    subject: str
-    grants: frozenset[tuple[str, str | None]]
-
-    @property
-    def roles(self) -> set[str]:
-        return {role for role, _package_id in self.grants}
+class AdminIdentity:
+    user_id: str
+    display_name: str
+    roles: tuple[str, ...]
 
 
-def digest_secret(secret: str) -> str:
-    return hmac.new(
-        settings.api_key_pepper.encode(), secret.encode(), hashlib.sha256
-    ).hexdigest()
+ROLE_PERMISSIONS = {
+    "editor": ("knowledge:read", "knowledge:write", "release:validate"),
+    "publisher": (
+        "knowledge:read",
+        "knowledge:write",
+        "release:validate",
+        "release:publish",
+    ),
+    "admin": (
+        "knowledge:read",
+        "knowledge:write",
+        "release:validate",
+        "release:publish",
+        "admin:manage",
+    ),
+}
 
 
-def issue_api_key() -> tuple[str, str, str]:
-    key_id = secrets.token_urlsafe(12).replace("-", "").replace("_", "")[:16]
-    secret = secrets.token_urlsafe(32)
-    return key_id, secret, f"kh_live_{key_id}.{secret}"
+def admin_identity(request: Request) -> AdminIdentity:
+    settings: Settings = request.app.state.settings
+    if not (settings.local_admin_enabled and settings.environment == "development"):
+        raise BusinessError("AUTH_FAILED", "管理端需要 SSO/OIDC 身份", 401)
+    roles = tuple(
+        role.strip()
+        for role in request.headers.get("X-Admin-Roles", "admin").split(",")
+        if role.strip() in ROLE_PERMISSIONS
+    )
+    if not roles:
+        raise BusinessError("FORBIDDEN", "当前用户没有管理端角色", 403)
+    return AdminIdentity(
+        user_id=request.headers.get("X-Admin-User", "local-admin"),
+        display_name=request.headers.get("X-Admin-Name", "本地管理员"),
+        roles=roles,
+    )
 
 
-def _parse_api_key(value: str) -> tuple[str, str]:
-    if not value.startswith("kh_live_") or "." not in value:
-        raise ApiError(401, "INVALID_API_KEY", "调用凭证无效")
-    public, secret = value.removeprefix("kh_live_").split(".", 1)
-    if not public or len(secret) < 32:
-        raise ApiError(401, "INVALID_API_KEY", "调用凭证无效")
-    return public, secret
+def require_admin(request: Request) -> str:
+    identity = admin_identity(request)
+    return request.headers.get("X-Admin-Actor", identity.user_id)
 
 
-def get_client_app(
-    db: Session = DbSession, authorization: str | None = Header(default=None)
-) -> ClientApp:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise ApiError(401, "INVALID_API_KEY", "缺少调用凭证")
-    key_id, secret = _parse_api_key(authorization[7:])
-    app = db.scalar(select(ClientApp).where(ClientApp.key_id == key_id))
-    valid = app and hmac.compare_digest(app.secret_digest, digest_secret(secret))
-    if not valid or app.status != "active":
-        raise ApiError(401, "INVALID_API_KEY", "调用凭证无效")
-    if app.expires_at and app.expires_at <= utcnow():
-        raise ApiError(401, "INVALID_API_KEY", "调用凭证已过期")
-    return app
+def require_roles(*required: str):
+    def dependency(request: Request) -> AdminIdentity:
+        identity = admin_identity(request)
+        if not set(identity.roles).intersection(required):
+            raise BusinessError("FORBIDDEN", "当前用户没有执行该操作的权限", 403)
+        return identity
+
+    return dependency
 
 
-def get_admin_context(
-    db: Session = DbSession,
-    x_admin_subject: str | None = Header(default=None),
-    x_admin_roles: str | None = Header(default=None),
-    x_authenticated_subject: str | None = Header(default=None),
-) -> AdminContext:
-    if settings.environment in {"development", "test"} and settings.local_admin_enabled:
-        subject = x_admin_subject or "local-admin"
-        roles = {
-            item.strip().lower()
-            for item in (x_admin_roles or ",".join(ALL_ROLES)).split(",")
-            if item.strip().lower() in ALL_ROLES
-        }
-        return AdminContext(subject, frozenset((role, None) for role in roles))
-    if not x_authenticated_subject:
-        raise ApiError(401, "ACCESS_DENIED", "缺少可信管理身份")
-    user = db.scalar(
-        select(AdminUser).where(
-            AdminUser.subject == x_authenticated_subject, AdminUser.status == "active"
+def canonical_request(
+    request: Request, body: bytes, timestamp: str, nonce: str
+) -> bytes:
+    query_hash = hashlib.sha256(request.url.query.encode()).hexdigest()
+    body_hash = hashlib.sha256(body).hexdigest()
+    return "\n".join(
+        [request.method, request.url.path, query_hash, body_hash, timestamp, nonce]
+    ).encode()
+
+
+def _decode_secret(ciphertext: str, settings: Settings) -> bytes:
+    """Decrypt a client Secret with the deployment-provided Fernet key."""
+    if not settings.api_secret_key:
+        raise BusinessError("AUTH_FAILED", "服务未配置 API Secret 解密密钥", 401)
+    try:
+        return Fernet(settings.api_secret_key.encode()).decrypt(ciphertext.encode())
+    except (ValueError, InvalidToken) as exc:
+        raise BusinessError("AUTH_FAILED", "API Secret 不可用", 401) from exc
+
+
+async def verify_open_request(
+    request: Request, db: Session = Depends(get_db)
+) -> ApiClient:
+    settings: Settings = request.app.state.settings
+    app_key = request.headers.get("X-App-Key")
+    timestamp = request.headers.get("X-Timestamp")
+    nonce = request.headers.get("X-Nonce")
+    signature = request.headers.get("X-Signature")
+    if not all((app_key, timestamp, nonce, signature)):
+        raise BusinessError("AUTH_FAILED", "缺少开放接口鉴权请求头", 401)
+
+    try:
+        if abs(time.time() - int(timestamp)) > settings.api_hmac_window_seconds:
+            raise BusinessError("AUTH_FAILED", "请求已超出时间窗口", 401)
+    except ValueError as exc:
+        raise BusinessError("AUTH_FAILED", "时间戳无效", 401) from exc
+
+    client = db.scalar(select(ApiClient).where(ApiClient.app_key == app_key))
+    if not client or client.status != "active":
+        raise BusinessError("AUTH_FAILED", "AppKey 无效", 401)
+    if not set(client.allowed_scopes or []).intersection({"read", "knowledge:read"}):
+        raise BusinessError("FORBIDDEN", "AppKey 没有知识读取权限", 403)
+
+    db.add(ApiNonce(app_key=app_key, nonce=nonce, created_at=utc_now()))
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise BusinessError("AUTH_FAILED", "Nonce 重复，拒绝重放请求", 401) from exc
+
+    body = await request.body()
+    secret = _decode_secret(client.secret_ciphertext, settings)
+    expected = base64.b64encode(
+        hmac.new(
+            secret, canonical_request(request, body, timestamp, nonce), hashlib.sha256
+        ).digest()
+    ).decode()
+    if not hmac.compare_digest(expected, signature):
+        db.rollback()
+        raise BusinessError("AUTH_FAILED", "签名校验失败", 401)
+
+    bucket = int(time.time() // 60)
+    rate_bucket = db.scalar(
+        select(ApiRateBucket).where(
+            ApiRateBucket.app_key == app_key, ApiRateBucket.bucket_minute == bucket
         )
     )
-    if not user:
-        raise ApiError(403, "ACCESS_DENIED", "管理身份未授权")
-    grants = db.execute(
-        select(AdminUserRole.role, AdminUserRole.package_id).where(
-            AdminUserRole.admin_user_id == user.id
+    if rate_bucket is None:
+        rate_bucket = ApiRateBucket(
+            app_key=app_key, bucket_minute=bucket, request_count=0
         )
-    ).all()
-    return AdminContext(user.subject, frozenset(grants))
-
-
-ClientAppDependency = Depends(get_client_app)
-AdminDependency = Depends(get_admin_context)
-
-
-def require_role(
-    actor: AdminContext, *roles: str, package_id: str | None = None
-) -> None:
-    if not any(
-        (role, None) in actor.grants or (role, package_id) in actor.grants
-        for role in roles
+        db.add(rate_bucket)
+    rate_bucket.request_count += 1
+    if rate_bucket.request_count > min(
+        client.rate_limit_per_minute, settings.api_rate_limit_per_minute
     ):
-        raise ApiError(403, "ACCESS_DENIED", "当前角色无权执行此操作")
+        db.commit()
+        raise BusinessError("RATE_LIMITED", "请求过于频繁，请稍后再试", 429)
+    db.commit()
+    return client
 
 
-def key_expired(expires_at: datetime | None) -> bool:
-    return bool(expires_at and expires_at <= utcnow())
+def open_dependency() -> Callable[..., Awaitable[ApiClient]]:
+    return verify_open_request
