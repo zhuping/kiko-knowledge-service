@@ -5,7 +5,7 @@ MYSQL ?= mysql
 PORT ?= 8001
 
 install:
-	$(PYTHON) -m pip install -e '.[test,dev]'
+	$(PYTHON) -m pip install -e '.[mysql,test,dev]'
 
 db-init:
 	@command -v $(MYSQL) >/dev/null || { echo "未找到 mysql 客户端，请先安装并启动 MySQL 8"; exit 1; }
