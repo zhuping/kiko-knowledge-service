@@ -147,7 +147,7 @@ class SearchRequest(CamelModel):
     scope: Optional[KnowledgeScope] = None
     status: Optional[KnowledgeStatus] = None
     page_num: int = Field(default=1, ge=1)
-    page_size: int = Field(default=10, ge=1, le=100)
+    page_size: int = Field(default=20, ge=1, le=100)
     release_version: Optional[str] = None
 
 

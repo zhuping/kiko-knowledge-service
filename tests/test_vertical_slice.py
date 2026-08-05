@@ -4,8 +4,10 @@ import base64
 import hashlib
 import hmac
 import time
+from io import BytesIO
 
 from cryptography.fernet import Fernet
+from openpyxl import Workbook
 
 from app.models import ApiClient
 
@@ -120,6 +122,17 @@ def open_headers(
 
 def test_publish_and_read_immutable_tree(client):
     release = seed_release(client)
+    releases = client.get(
+        "/api/v1/admin/releases", params={"pageNum": 1, "pageSize": 20}
+    ).json()["data"]
+    assert releases["total"] == 1
+    assert releases["list"][0]["versionLabel"] == release["versionLabel"]
+    mappings = client.get(
+        "/api/v1/admin/textbook-mappings",
+        params={"pageNum": 1, "pageSize": 20},
+    ).json()["data"]
+    assert mappings["total"] == 1
+    assert mappings["list"][0]["canonicalId"] == "m.num.count.1_100"
     response = client.get("/api/v1/open/knowledge/tree", headers=open_headers(client))
     assert response.status_code == 200
     assert response.json()["meta"]["releaseVersion"] == release["versionLabel"]
@@ -204,6 +217,115 @@ def test_admin_contract_crud_and_relation_groups(client):
     assert relation.status_code == 200
     groups = client.get("/api/v1/admin/relations/m.num.write.1_100")
     assert groups.json()["data"]["prerequisites"] == ["m.num.count.1_100"]
+    relation_page = client.get(
+        "/api/v1/admin/relations/m.num.write.1_100",
+        params={"group": "prerequisites", "pageNum": 1, "pageSize": 20},
+    ).json()["data"]
+    assert relation_page["total"] == 1
+    assert relation_page["list"] == ["m.num.count.1_100"]
+
+    knowledge_page = client.get(
+        "/api/v1/admin/knowledge",
+        params={"groupNodeId": group, "pageNum": 2, "pageSize": 1},
+    ).json()["data"]
+    assert knowledge_page["total"] == 2
+    assert len(knowledge_page["list"]) == 1
+    search_page = client.get(
+        "/api/v1/admin/knowledge",
+        params={"keyword": "数数", "pageNum": 1, "pageSize": 20},
+    ).json()["data"]
+    assert search_page["total"] == 1
+    assert search_page["list"][0]["canonicalId"] == "m.num.count.1_100"
+
+
+def test_admin_release_changes_and_audit_logs(client):
+    seed_group(client)
+
+    changes = client.get("/api/v1/admin/release-changes")
+    assert changes.status_code == 200
+    assert changes.json()["data"][0]["entityType"] == "catalog_node"
+
+    first_page = client.get(
+        "/api/v1/admin/audit-logs", params={"pageNum": 1, "pageSize": 2}
+    )
+    second_page = client.get(
+        "/api/v1/admin/audit-logs", params={"pageNum": 2, "pageSize": 2}
+    )
+    assert first_page.status_code == 200
+    first_data = first_page.json()["data"]
+    second_data = second_page.json()["data"]
+    assert first_data["total"] == 4
+    assert first_data["pageSize"] == 2
+    assert len(first_data["list"]) == 2
+    assert first_data["list"][0]["actorType"] == "admin"
+    assert first_data["list"][0]["resourceType"] == "catalog_node"
+    assert {item["id"] for item in first_data["list"]}.isdisjoint(
+        {item["id"] for item in second_data["list"]}
+    )
+
+
+def test_admin_import_prevalidates_xlsx(client):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "knowledge_points"
+    sheet.append(
+        [
+            "canonical_id",
+            "type",
+            "name",
+            "grade_term",
+            "scope",
+            "pep24_path",
+            "ocr_signals",
+            "exercise_signature",
+            "prerequisites",
+        ]
+    )
+    sheet.append(
+        [
+            "m.num.count.1_100",
+            "skill",
+            "100以内数数",
+            "一年级上册",
+            "core",
+            "一上/数的认识",
+            '["数到100"]',
+            None,
+            "[]",
+        ]
+    )
+    content = BytesIO()
+    workbook.save(content)
+
+    response = client.post(
+        "/api/v1/admin/imports",
+        files={
+            "file": (
+                "knowledge.xlsx",
+                content.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+    job = response.json()["data"]
+    assert job["status"] == "success"
+    assert job["totalCount"] == 1
+    assert job["errorCount"] == 0
+    assert client.get(f"/api/v1/admin/jobs/{job['jobId']}").json()["data"] == job
+    errors = client.get(
+        f"/api/v1/admin/jobs/{job['jobId']}/errors",
+        params={"pageNum": 1, "pageSize": 20},
+    ).json()["data"]
+    assert errors["total"] == 0
+    assert errors["list"] == []
+
+    committed = client.post(f"/api/v1/admin/imports/{job['jobId']}/commit")
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["data"]["committed"] is True
+    knowledge = client.get("/api/v1/admin/knowledge/m.num.count.1_100").json()["data"]
+    assert knowledge["knowledgeName"] == "100以内数数"
+    assert knowledge["textbookMappings"][0]["textbookPath"] == "一上/数的认识"
 
 
 def test_publish_validation_blocks_missing_textbook_mapping(client):

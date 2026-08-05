@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import BusinessError
@@ -47,6 +47,19 @@ TERM_TYPES = {
     "derivative_keywords": "derivative_keyword",
     "ocr_signals": "ocr_signal",
 }
+
+
+def _page_rows(session: Session, statement, page_num: int, page_size: int):
+    total = (
+        session.scalar(
+            select(func.count()).select_from(statement.order_by(None).subquery())
+        )
+        or 0
+    )
+    rows = list(
+        session.scalars(statement.offset((page_num - 1) * page_size).limit(page_size))
+    )
+    return total, rows
 
 
 def _json_hash(payload: dict[str, Any]) -> str:
@@ -566,6 +579,28 @@ def list_mappings(
     ]
 
 
+def page_mappings(
+    session: Session,
+    edition_code: str | None = None,
+    canonical_id: str | None = None,
+    page_num: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[dict[str, Any]]]:
+    statement = select(TextbookMapping)
+    if edition_code:
+        statement = statement.join(TextbookEdition).where(
+            TextbookEdition.edition_code == edition_code
+        )
+    if canonical_id:
+        statement = statement.join(KnowledgeObject).where(
+            KnowledgeObject.canonical_id == canonical_id
+        )
+    total, rows = _page_rows(
+        session, statement.order_by(TextbookMapping.id), page_num, page_size
+    )
+    return total, [_mapping_response(session, row) for row in rows]
+
+
 def create_relation(
     session: Session, data: RelationCreate, actor: str, commit: bool = True
 ) -> KnowledgeRelation:
@@ -724,6 +759,62 @@ def relation_groups(session: Session, canonical_id: str) -> dict[str, list[str]]
     return groups
 
 
+def page_relation_group(
+    session: Session,
+    canonical_id: str,
+    group: str,
+    page_num: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[str]]:
+    knowledge = get_knowledge(session, canonical_id)
+    statement = select(KnowledgeRelation).where(
+        KnowledgeRelation.status == "active",
+        KnowledgeRelation.space_id == _knowledge_space(session, knowledge.id).id,
+    )
+    if group == "prerequisites":
+        statement = statement.where(
+            KnowledgeRelation.relation_type == "prerequisite",
+            KnowledgeRelation.to_knowledge_id == knowledge.id,
+        )
+    elif group == "successors":
+        statement = statement.where(
+            KnowledgeRelation.relation_type == "prerequisite",
+            KnowledgeRelation.from_knowledge_id == knowledge.id,
+        )
+    else:
+        statement = statement.where(
+            KnowledgeRelation.relation_type == group,
+            or_(
+                KnowledgeRelation.from_knowledge_id == knowledge.id,
+                KnowledgeRelation.to_knowledge_id == knowledge.id,
+            ),
+        )
+    total, rows = _page_rows(
+        session, statement.order_by(KnowledgeRelation.id), page_num, page_size
+    )
+    related_ids = {
+        row.from_knowledge_id
+        if row.to_knowledge_id == knowledge.id
+        else row.to_knowledge_id
+        for row in rows
+    }
+    canonical_ids = dict(
+        session.execute(
+            select(KnowledgeObject.id, KnowledgeObject.canonical_id).where(
+                KnowledgeObject.id.in_(related_ids)
+            )
+        ).all()
+    )
+    return total, [
+        canonical_ids[
+            row.from_knowledge_id
+            if row.to_knowledge_id == knowledge.id
+            else row.to_knowledge_id
+        ]
+        for row in rows
+    ]
+
+
 def get_knowledge(session: Session, canonical_id: str) -> KnowledgeObject:
     knowledge = session.scalar(
         select(KnowledgeObject).where(KnowledgeObject.canonical_id == canonical_id)
@@ -766,34 +857,49 @@ def list_knowledge(
     knowledge_type: str | None = None,
     scope: str | None = None,
     status: str | None = None,
+    group_node_id: int | None = None,
     page_num: int = 1,
-    page_size: int = 10,
+    page_size: int = 20,
 ) -> tuple[int, list[dict[str, Any]]]:
-    rows = list(session.scalars(select(KnowledgeObject).order_by(KnowledgeObject.id)))
-    keyword = keyword.lower() if keyword else None
-    filtered = []
-    for row in rows:
-        terms = _term_values(session, row.id)
-        searchable = " ".join(
-            [row.name, *(value for values in terms.values() for value in values)]
-        ).lower()
-        if keyword and keyword not in searchable:
-            continue
-        if canonical_id and row.canonical_id != canonical_id:
-            continue
-        if grade_term and row.grade_term != grade_term:
-            continue
-        if knowledge_type and row.type != knowledge_type:
-            continue
-        if scope and row.scope != scope:
-            continue
-        if status and row.status != status:
-            continue
-        filtered.append(row)
-    start = (page_num - 1) * page_size
-    return len(filtered), [
-        knowledge_response(session, row) for row in filtered[start : start + page_size]
-    ]
+    statement = select(KnowledgeObject)
+    if keyword:
+        pattern = f"%{keyword}%"
+        statement = statement.where(
+            or_(
+                KnowledgeObject.name.ilike(pattern),
+                KnowledgeObject.canonical_id.ilike(pattern),
+                select(KnowledgeTerm.id)
+                .where(
+                    KnowledgeTerm.knowledge_id == KnowledgeObject.id,
+                    KnowledgeTerm.term.ilike(pattern),
+                )
+                .exists(),
+            )
+        )
+    if canonical_id:
+        statement = statement.where(KnowledgeObject.canonical_id == canonical_id)
+    if grade_term:
+        statement = statement.where(KnowledgeObject.grade_term == grade_term)
+    if knowledge_type:
+        statement = statement.where(KnowledgeObject.type == knowledge_type)
+    if scope:
+        statement = statement.where(KnowledgeObject.scope == scope)
+    if status:
+        statement = statement.where(KnowledgeObject.status == status)
+    if group_node_id:
+        statement = statement.where(
+            select(CatalogKnowledgeNode.id)
+            .where(
+                CatalogKnowledgeNode.group_node_id == group_node_id,
+                CatalogKnowledgeNode.knowledge_id == KnowledgeObject.id,
+                CatalogKnowledgeNode.status != "disabled",
+            )
+            .exists()
+        )
+    total, rows = _page_rows(
+        session, statement.order_by(KnowledgeObject.id), page_num, page_size
+    )
+    return total, [knowledge_response(session, row) for row in rows]
 
 
 def update_knowledge(
@@ -959,23 +1065,25 @@ def tree_rows(session: Session, space_code: str = "default") -> list[CatalogNode
     )
 
 
-def list_policy_mappings(
-    session: Session, canonical_id: str | None = None
-) -> list[dict[str, Any]]:
-    rows = list(
-        session.scalars(
-            select(KnowledgePolicyMapping).order_by(KnowledgePolicyMapping.id)
+def page_policy_mappings(
+    session: Session,
+    canonical_id: str | None = None,
+    page_num: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[dict[str, Any]]]:
+    statement = select(KnowledgePolicyMapping)
+    if canonical_id:
+        statement = statement.join(KnowledgeObject).where(
+            KnowledgeObject.canonical_id == canonical_id
         )
+    total, rows = _page_rows(
+        session, statement.order_by(KnowledgePolicyMapping.id), page_num, page_size
     )
     result = []
     for row in rows:
         knowledge = session.get(KnowledgeObject, row.knowledge_id)
         rule = session.get(PolicyRule, row.policy_rule_id)
-        if (
-            not knowledge
-            or not rule
-            or (canonical_id and knowledge.canonical_id != canonical_id)
-        ):
+        if not knowledge or not rule:
             continue
         result.append(
             {
@@ -990,7 +1098,7 @@ def list_policy_mappings(
                 "status": row.status,
             }
         )
-    return result
+    return total, result
 
 
 def create_policy_mapping(

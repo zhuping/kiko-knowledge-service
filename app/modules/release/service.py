@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import BusinessError
@@ -320,7 +320,65 @@ def get_release_document(
     return version, snapshot_document(session, version.id)
 
 
-def list_releases(session: Session) -> list[ReleaseVersion]:
-    return list(
-        session.scalars(select(ReleaseVersion).order_by(ReleaseVersion.id.desc()))
+def list_releases(
+    session: Session, page_num: int = 1, page_size: int = 20
+) -> tuple[int, list[ReleaseVersion]]:
+    total = session.scalar(select(func.count()).select_from(ReleaseVersion)) or 0
+    rows = list(
+        session.scalars(
+            select(ReleaseVersion)
+            .order_by(ReleaseVersion.id.desc())
+            .offset((page_num - 1) * page_size)
+            .limit(page_size)
+        )
     )
+    return total, rows
+
+
+def list_release_changes(session: Session) -> list[dict[str, Any]]:
+    changes = session.scalars(
+        select(ChangeLog)
+        .where(ChangeLog.status == "unreleased")
+        .order_by(ChangeLog.created_at.desc(), ChangeLog.id.desc())
+    )
+    return [
+        {
+            "id": change.id,
+            "entityType": change.entity_type,
+            "entityKey": change.entity_key,
+            "operation": change.operation,
+            "summary": (
+                change.after_payload.get("name")
+                or change.after_payload.get("title")
+                or change.after_payload.get("canonical_id")
+                if isinstance(change.after_payload, dict)
+                else None
+            ),
+        }
+        for change in changes
+    ]
+
+
+def list_audit_logs(
+    session: Session, page_num: int = 1, page_size: int = 20
+) -> tuple[int, list[dict[str, Any]]]:
+    total = session.scalar(select(func.count()).select_from(AuditLog)) or 0
+    logs = session.scalars(
+        select(AuditLog)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .offset((page_num - 1) * page_size)
+        .limit(page_size)
+    )
+    return total, [
+        {
+            "id": log.id,
+            "actorType": "admin",
+            "actorId": log.actor_id,
+            "action": log.action,
+            "resourceType": log.entity_type or "",
+            "resourceId": log.entity_key or "",
+            "requestId": log.request_id,
+            "createdAt": log.created_at.isoformat(),
+        }
+        for log in logs
+    ]
