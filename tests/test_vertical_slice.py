@@ -8,6 +8,7 @@ from io import BytesIO
 
 from cryptography.fernet import Fernet
 from openpyxl import Workbook
+from sqlalchemy import event
 
 from app.models import ApiClient
 
@@ -224,12 +225,22 @@ def test_admin_contract_crud_and_relation_groups(client):
     assert relation_page["total"] == 1
     assert relation_page["list"] == ["m.num.count.1_100"]
 
-    knowledge_page = client.get(
-        "/api/v1/admin/knowledge",
-        params={"groupNodeId": group, "pageNum": 2, "pageSize": 1},
-    ).json()["data"]
+    statements = []
+
+    def count_query(*_):
+        statements.append(1)
+
+    event.listen(client.app.state.engine, "before_cursor_execute", count_query)
+    try:
+        knowledge_page = client.get(
+            "/api/v1/admin/knowledge",
+            params={"groupNodeId": group, "pageNum": 2, "pageSize": 1},
+        ).json()["data"]
+    finally:
+        event.remove(client.app.state.engine, "before_cursor_execute", count_query)
     assert knowledge_page["total"] == 2
     assert len(knowledge_page["list"]) == 1
+    assert len(statements) == 4
     search_page = client.get(
         "/api/v1/admin/knowledge",
         params={"keyword": "数数", "pageNum": 1, "pageSize": 20},
@@ -244,6 +255,7 @@ def test_admin_release_changes_and_audit_logs(client):
     changes = client.get("/api/v1/admin/release-changes")
     assert changes.status_code == 200
     assert changes.json()["data"][0]["entityType"] == "catalog_node"
+    assert client.get("/api/v1/admin/audit-logs").json()["data"]["pageSize"] == 10
 
     first_page = client.get(
         "/api/v1/admin/audit-logs", params={"pageNum": 1, "pageSize": 2}

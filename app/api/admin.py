@@ -127,7 +127,7 @@ def job_errors(
     job_id: int,
     request: Request,
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
@@ -267,7 +267,7 @@ def knowledge_list(
     status: KnowledgeStatus | None = Query(None),
     group_node_id: int | None = Query(None, alias="groupNodeId"),
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
@@ -352,7 +352,7 @@ def get_relations(
         None
     ),
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
@@ -387,7 +387,7 @@ def textbook_mappings(
     edition_code: str | None = Query(None, alias="editionCode"),
     canonical_id: str | None = Query(None, alias="canonicalId"),
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
@@ -416,7 +416,7 @@ def policy_mappings(
     request: Request,
     canonical_id: str | None = Query(None, alias="canonicalId"),
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
@@ -500,7 +500,7 @@ def publish_release_batch(
 def releases(
     request: Request,
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
@@ -538,7 +538,7 @@ def release_changes(
 def audit_logs(
     request: Request,
     page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(20, alias="pageSize", ge=1, le=100),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):

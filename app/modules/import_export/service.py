@@ -325,7 +325,7 @@ def get_job(session: Session, job_id: int) -> Job:
 
 
 def list_job_errors(
-    session: Session, job_id: int, page_num: int = 1, page_size: int = 20
+    session: Session, job_id: int, page_num: int = 1, page_size: int = 10
 ) -> tuple[int, list[dict[str, Any]]]:
     errors = (get_job(session, job_id).payload_json or {}).get("errors", [])
     start = (page_num - 1) * page_size

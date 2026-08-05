@@ -161,8 +161,12 @@ def _term_values(session: Session, knowledge_id: int) -> dict[str, list[str]]:
     return values
 
 
-def knowledge_payload(session: Session, knowledge: KnowledgeObject) -> dict[str, Any]:
-    terms = _term_values(session, knowledge.id)
+def knowledge_payload(
+    session: Session,
+    knowledge: KnowledgeObject,
+    terms: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    terms = terms if terms is not None else _term_values(session, knowledge.id)
     return {
         "id": knowledge.id,
         "canonical_id": knowledge.canonical_id,
@@ -182,13 +186,15 @@ def knowledge_payload(session: Session, knowledge: KnowledgeObject) -> dict[str,
     }
 
 
-def _mapping_response(session: Session, mapping: TextbookMapping) -> dict[str, Any]:
-    edition = session.get(TextbookEdition, mapping.edition_id)
-    knowledge = session.get(KnowledgeObject, mapping.knowledge_id)
+def _mapping_values(
+    mapping: TextbookMapping,
+    edition_code: str | None,
+    canonical_id: str | None,
+) -> dict[str, Any]:
     return {
         "id": mapping.id,
-        "canonicalId": knowledge.canonical_id if knowledge else None,
-        "editionCode": edition.edition_code if edition else None,
+        "canonicalId": canonical_id,
+        "editionCode": edition_code,
         "textbookPath": mapping.textbook_path,
         "mappingType": mapping.mapping_type,
         "alignmentType": mapping.alignment_type,
@@ -199,6 +205,16 @@ def _mapping_response(session: Session, mapping: TextbookMapping) -> dict[str, A
         "evidence": mapping.evidence,
         "status": mapping.status,
     }
+
+
+def _mapping_response(session: Session, mapping: TextbookMapping) -> dict[str, Any]:
+    edition = session.get(TextbookEdition, mapping.edition_id)
+    knowledge = session.get(KnowledgeObject, mapping.knowledge_id)
+    return _mapping_values(
+        mapping,
+        edition.edition_code if edition else None,
+        knowledge.canonical_id if knowledge else None,
+    )
 
 
 def mapping_payload(session: Session, mapping: TextbookMapping) -> dict[str, Any]:
@@ -562,20 +578,23 @@ def create_mapping(
 def list_mappings(
     session: Session, edition_code: str | None = None, canonical_id: str | None = None
 ) -> list[dict[str, Any]]:
-    statement = select(TextbookMapping).order_by(TextbookMapping.id)
-    rows = list(session.scalars(statement))
+    statement = (
+        select(
+            TextbookMapping,
+            TextbookEdition.edition_code,
+            KnowledgeObject.canonical_id,
+        )
+        .join(TextbookEdition, TextbookEdition.id == TextbookMapping.edition_id)
+        .join(KnowledgeObject, KnowledgeObject.id == TextbookMapping.knowledge_id)
+        .order_by(TextbookMapping.id)
+    )
+    if edition_code:
+        statement = statement.where(TextbookEdition.edition_code == edition_code)
+    if canonical_id:
+        statement = statement.where(KnowledgeObject.canonical_id == canonical_id)
     return [
-        _mapping_response(session, row)
-        for row in rows
-        if (
-            not edition_code
-            or session.get(TextbookEdition, row.edition_id).edition_code == edition_code
-        )
-        and (
-            not canonical_id
-            or session.get(KnowledgeObject, row.knowledge_id).canonical_id
-            == canonical_id
-        )
+        _mapping_values(mapping, row_edition_code, row_canonical_id)
+        for mapping, row_edition_code, row_canonical_id in session.execute(statement)
     ]
 
 
@@ -584,7 +603,7 @@ def page_mappings(
     edition_code: str | None = None,
     canonical_id: str | None = None,
     page_num: int = 1,
-    page_size: int = 20,
+    page_size: int = 10,
 ) -> tuple[int, list[dict[str, Any]]]:
     statement = select(TextbookMapping)
     if edition_code:
@@ -764,7 +783,7 @@ def page_relation_group(
     canonical_id: str,
     group: str,
     page_num: int = 1,
-    page_size: int = 20,
+    page_size: int = 10,
 ) -> tuple[int, list[str]]:
     knowledge = get_knowledge(session, canonical_id)
     statement = select(KnowledgeRelation).where(
@@ -824,9 +843,18 @@ def get_knowledge(session: Session, canonical_id: str) -> KnowledgeObject:
     return knowledge
 
 
-def knowledge_response(session: Session, knowledge: KnowledgeObject) -> dict[str, Any]:
-    payload = knowledge_payload(session, knowledge)
-    mappings = list_mappings(session, canonical_id=knowledge.canonical_id)
+def knowledge_response(
+    session: Session,
+    knowledge: KnowledgeObject,
+    terms: dict[str, list[str]] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = knowledge_payload(session, knowledge, terms)
+    mappings = (
+        mappings
+        if mappings is not None
+        else list_mappings(session, canonical_id=knowledge.canonical_id)
+    )
     return {
         "canonicalId": payload["canonical_id"],
         "knowledgeName": payload["name"],
@@ -849,6 +877,54 @@ def knowledge_response(session: Session, knowledge: KnowledgeObject) -> dict[str
     }
 
 
+def _knowledge_list_responses(
+    session: Session, rows: list[KnowledgeObject]
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    knowledge_by_id = {row.id: row for row in rows}
+    terms_by_id = {
+        knowledge_id: {name: [] for name in TERM_TYPES}
+        for knowledge_id in knowledge_by_id
+    }
+    term_names = {value: key for key, value in TERM_TYPES.items()}
+    for term in session.scalars(
+        select(KnowledgeTerm)
+        .where(KnowledgeTerm.knowledge_id.in_(knowledge_by_id))
+        .order_by(
+            KnowledgeTerm.knowledge_id, KnowledgeTerm.sort_order, KnowledgeTerm.id
+        )
+    ):
+        if name := term_names.get(term.term_type):
+            terms_by_id[term.knowledge_id][name].append(term.term)
+
+    mappings_by_id = {knowledge_id: [] for knowledge_id in knowledge_by_id}
+    mapping_rows = session.execute(
+        select(TextbookMapping, TextbookEdition.edition_code)
+        .join(TextbookEdition, TextbookEdition.id == TextbookMapping.edition_id)
+        .where(TextbookMapping.knowledge_id.in_(knowledge_by_id))
+        .order_by(TextbookMapping.id)
+    )
+    for mapping, edition_code in mapping_rows:
+        mappings_by_id[mapping.knowledge_id].append(
+            _mapping_values(
+                mapping,
+                edition_code,
+                knowledge_by_id[mapping.knowledge_id].canonical_id,
+            )
+        )
+
+    return [
+        knowledge_response(
+            session,
+            row,
+            terms_by_id[row.id],
+            mappings_by_id[row.id],
+        )
+        for row in rows
+    ]
+
+
 def list_knowledge(
     session: Session,
     keyword: str | None = None,
@@ -859,7 +935,7 @@ def list_knowledge(
     status: str | None = None,
     group_node_id: int | None = None,
     page_num: int = 1,
-    page_size: int = 20,
+    page_size: int = 10,
 ) -> tuple[int, list[dict[str, Any]]]:
     statement = select(KnowledgeObject)
     if keyword:
@@ -899,7 +975,7 @@ def list_knowledge(
     total, rows = _page_rows(
         session, statement.order_by(KnowledgeObject.id), page_num, page_size
     )
-    return total, [knowledge_response(session, row) for row in rows]
+    return total, _knowledge_list_responses(session, rows)
 
 
 def update_knowledge(
@@ -1069,7 +1145,7 @@ def page_policy_mappings(
     session: Session,
     canonical_id: str | None = None,
     page_num: int = 1,
-    page_size: int = 20,
+    page_size: int = 10,
 ) -> tuple[int, list[dict[str, Any]]]:
     statement = select(KnowledgePolicyMapping)
     if canonical_id:

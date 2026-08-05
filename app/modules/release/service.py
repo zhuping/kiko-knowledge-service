@@ -321,7 +321,7 @@ def get_release_document(
 
 
 def list_releases(
-    session: Session, page_num: int = 1, page_size: int = 20
+    session: Session, page_num: int = 1, page_size: int = 10
 ) -> tuple[int, list[ReleaseVersion]]:
     total = session.scalar(select(func.count()).select_from(ReleaseVersion)) or 0
     rows = list(
@@ -360,7 +360,7 @@ def list_release_changes(session: Session) -> list[dict[str, Any]]:
 
 
 def list_audit_logs(
-    session: Session, page_num: int = 1, page_size: int = 20
+    session: Session, page_num: int = 1, page_size: int = 10
 ) -> tuple[int, list[dict[str, Any]]]:
     total = session.scalar(select(func.count()).select_from(AuditLog)) or 0
     logs = session.scalars(
