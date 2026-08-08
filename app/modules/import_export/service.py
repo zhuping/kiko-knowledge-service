@@ -14,20 +14,12 @@ from app.models import (
     AuditLog,
     Job,
     KnowledgeObject,
-    KnowledgeRelation,
-    TextbookMapping,
 )
 from app.models.base import utc_now
-from app.modules.catalog.service import (
-    _change,
-    _write_terms,
-    ensure_context,
-    knowledge_payload,
-    mapping_payload,
-    relation_payload,
-)
+from app.modules.knowledge.service import _create_revision
+from app.modules.relation.service import _create_edge
+from app.schemas.catalog import GRADE_TERM_LABELS, KnowledgeScope, KnowledgeType
 
-IMPORT_SHEET = "knowledge_points"
 IMPORT_HEADERS = (
     "canonical_id",
     "type",
@@ -39,229 +31,131 @@ IMPORT_HEADERS = (
     "exercise_signature",
     "prerequisites",
 )
-MAX_IMPORT_ROWS = 1000
-MAX_IMPORT_BYTES = 10 * 1024 * 1024
+GRADE_TERM_BY_LABEL = {value: key for key, value in GRADE_TERM_LABELS.items()}
+KNOWLEDGE_TYPES = set(KnowledgeType.__args__)
+SCOPES = set(KnowledgeScope.__args__)
 CANONICAL_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
-KNOWLEDGE_TYPES = {"concept", "skill", "problem_model", "strategy", "activity"}
-GRADE_TERMS = {"一年级上册", "一年级下册", "二年级上册", "二年级下册"}
-SCOPES = {"core", "supplement"}
+MAX_IMPORT_BYTES = 10 * 1024 * 1024
+MAX_IMPORT_ROWS = 1000
 
 
-def _error(row_number: int, field: str, reason: str, suggestion: str) -> dict[str, Any]:
+def _error(row: int, field: str, reason: str, suggestion: str) -> dict[str, Any]:
     return {
-        "rowNumber": row_number,
+        "rowNumber": row,
         "field": field,
         "reason": reason,
         "suggestion": suggestion,
     }
 
 
-def _validate_workbook(
-    content: bytes,
-) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+def _json_array(value: str, row: int, field: str, errors: list[dict[str, Any]]):
+    if not value:
+        return []
+    try:
+        result = json.loads(value)
+    except json.JSONDecodeError:
+        result = None
+    if not isinstance(result, list):
+        errors.append(_error(row, field, "必须是 JSON 数组", "例如填写 []"))
+        return []
+    if any(not isinstance(item, str) for item in result):
+        errors.append(_error(row, field, "数组元素必须是字符串", "请检查 JSON 数组"))
+        return []
+    return list(dict.fromkeys(item.strip() for item in result))
+
+
+def _validate(content: bytes):
     try:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:
         raise BusinessError("FILE_INVALID", "Excel 文件无法读取", 422) from exc
-
-    if IMPORT_SHEET not in workbook.sheetnames:
-        return (
-            0,
-            [
-                _error(
-                    0,
-                    "knowledge_points",
-                    "缺少 knowledge_points 工作表",
-                    "请使用模板或将主工作表重命名为 knowledge_points",
-                )
-            ],
-            [],
-            [],
-        )
-
-    sheet = workbook[IMPORT_SHEET]
-    header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
-    headers = tuple(
-        str(value).strip() if value is not None else "" for value in header_row
-    )
-    missing_headers = [header for header in IMPORT_HEADERS if header not in headers]
-    if missing_headers:
-        return (
-            0,
-            [
-                _error(
-                    1,
-                    "表头",
-                    f"缺少必填列：{', '.join(missing_headers)}",
-                    "请使用系统提供的 Excel 模板",
-                )
-            ],
-            [],
-            [],
-        )
-
-    header_indexes = {header: headers.index(header) for header in IMPORT_HEADERS}
-    rows = [
-        row
-        for row in sheet.iter_rows(min_row=2, values_only=True)
-        if any(value is not None and str(value).strip() for value in row)
-    ]
-    errors: list[dict[str, Any]] = []
+    if "knowledge_points" not in workbook.sheetnames:
+        raise BusinessError("VALIDATION_FAILED", "缺少 knowledge_points 工作表", 422)
+    sheet = workbook["knowledge_points"]
+    rows = list(sheet.iter_rows(values_only=True))
     if not rows:
-        errors.append(
-            _error(2, "knowledge_points", "没有可导入的数据", "至少填写一行知识点数据")
-        )
-    if len(rows) > MAX_IMPORT_ROWS:
-        errors.append(
-            _error(
-                0,
-                "数据行数",
-                f"单次最多导入 {MAX_IMPORT_ROWS} 行",
-                "请拆分 Excel 文件后分批上传",
-            )
-        )
-
-    required_fields = (
-        "canonical_id",
-        "type",
-        "name",
-        "grade_term",
-        "scope",
-        "pep24_path",
+        raise BusinessError("VALIDATION_FAILED", "Excel 没有数据", 422)
+    headers = tuple(
+        str(value).strip() if value is not None else "" for value in rows[0]
     )
-    records: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for row_number, row in enumerate(rows, start=2):
-        record: dict[str, Any] = {}
-        for field in IMPORT_HEADERS:
-            value = (
-                row[header_indexes[field]] if header_indexes[field] < len(row) else None
-            )
-            record[field] = str(value).strip() if value is not None else ""
-        for field in required_fields:
-            if not record[field]:
-                errors.append(_error(row_number, field, "不能为空", "请补充该字段"))
-        for field in ("ocr_signals", "prerequisites"):
-            value = record[field]
-            if not value:
-                record[field] = []
-                continue
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                parsed = None
-            if not isinstance(parsed, list):
-                errors.append(
-                    _error(
-                        row_number,
-                        field,
-                        "必须是 JSON 数组",
-                        '例如填写 [] 或 ["关键词"]',
-                    )
-                )
-            else:
-                record[field] = parsed
-        if record["canonical_id"]:
-            if not CANONICAL_ID.fullmatch(record["canonical_id"]):
-                errors.append(
-                    _error(
-                        row_number,
-                        "canonical_id",
-                        "格式无效",
-                        "请使用小写语义段并用英文句点分隔",
-                    )
-                )
-            if record["canonical_id"] in seen_ids:
-                errors.append(
-                    _error(
-                        row_number,
-                        "canonical_id",
-                        "文件内重复",
-                        "每个 canonical_id 只能出现一次",
-                    )
-                )
-            seen_ids.add(record["canonical_id"])
-        for field, allowed in (
-            ("type", KNOWLEDGE_TYPES),
-            ("grade_term", GRADE_TERMS),
-            ("scope", SCOPES),
-        ):
-            if record[field] and record[field] not in allowed:
-                errors.append(
-                    _error(row_number, field, "枚举值无效", "请按模板中的允许值填写")
-                )
-        records.append(record)
-
-    relations: list[dict[str, Any]] = []
-    if "prerequisites" in workbook.sheetnames:
-        relation_sheet = workbook["prerequisites"]
-        relation_header_row = next(
-            relation_sheet.iter_rows(min_row=1, max_row=1, values_only=True), ()
+    if headers != IMPORT_HEADERS:
+        raise BusinessError(
+            "VALIDATION_FAILED",
+            "Excel 表头不匹配",
+            422,
+            {"expected": list(IMPORT_HEADERS), "actual": list(headers)},
         )
-        relation_headers = tuple(
-            str(value).strip() if value is not None else ""
-            for value in relation_header_row
-        )
-        relation_fields = ("from_canonical_id", "to_canonical_id", "relation_type")
-        missing_relation_headers = [
-            field for field in relation_fields if field not in relation_headers
-        ]
-        if missing_relation_headers:
+    errors: list[dict[str, Any]] = []
+    records = []
+    seen: set[str] = set()
+    for row_number, row in enumerate(rows[1:], 2):
+        if not any(value is not None and str(value).strip() for value in row):
+            continue
+        value = {
+            field: str(row[index]).strip()
+            if index < len(row) and row[index] is not None
+            else ""
+            for index, field in enumerate(IMPORT_HEADERS)
+        }
+        for field in ("canonical_id", "type", "name", "grade_term", "scope"):
+            if not value[field]:
+                errors.append(_error(row_number, field, "不能为空", "请补充字段"))
+        canonical_id = value["canonical_id"]
+        if canonical_id and not CANONICAL_ID.fullmatch(canonical_id):
             errors.append(
-                _error(
-                    1,
-                    "prerequisites",
-                    f"缺少必填列：{', '.join(missing_relation_headers)}",
-                    "请使用系统提供的 Excel 模板",
-                )
+                _error(row_number, "canonical_id", "格式无效", "使用语义段 ID")
             )
-        else:
-            relation_indexes = {
-                field: relation_headers.index(field) for field in relation_fields
+        if canonical_id in seen:
+            errors.append(
+                _error(row_number, "canonical_id", "文件内重复", "ID 只能出现一次")
+            )
+        seen.add(canonical_id)
+        if value["type"] and value["type"] not in KNOWLEDGE_TYPES:
+            errors.append(
+                _error(row_number, "type", "枚举值无效", "请使用系统类型 key")
+            )
+        grade_term = GRADE_TERM_BY_LABEL.get(value["grade_term"], value["grade_term"])
+        if grade_term not in GRADE_TERM_LABELS:
+            errors.append(
+                _error(row_number, "grade_term", "年级/学期无效", "请使用教材年级")
+            )
+        if value["scope"] and value["scope"] not in SCOPES:
+            errors.append(
+                _error(row_number, "scope", "枚举值无效", "请使用 core 或 supplement")
+            )
+        ocr_signals = _json_array(
+            value["ocr_signals"], row_number, "ocr_signals", errors
+        )
+        prerequisites = _json_array(
+            value["prerequisites"], row_number, "prerequisites", errors
+        )
+        if canonical_id in prerequisites:
+            errors.append(
+                _error(row_number, "prerequisites", "不能引用自身", "删除自身知识点 ID")
+            )
+        records.append(
+            {
+                **value,
+                "grade_term_code": grade_term,
+                "ocr_signals": ocr_signals,
+                "prerequisites": prerequisites,
+                "row_number": row_number,
             }
-            for row_number, row in enumerate(
-                relation_sheet.iter_rows(min_row=2, values_only=True), start=2
-            ):
-                if not any(value is not None and str(value).strip() for value in row):
-                    continue
-                relation = {
-                    field: str(row[relation_indexes[field]]).strip()
-                    if row[relation_indexes[field]] is not None
-                    else ""
-                    for field in relation_fields
-                }
-                for field in relation_fields:
-                    if not relation[field]:
-                        errors.append(
-                            _error(row_number, field, "不能为空", "请补充该字段")
-                        )
-                if relation["relation_type"] not in {"prerequisite"}:
-                    errors.append(
-                        _error(
-                            row_number,
-                            "relation_type",
-                            "只支持 prerequisite",
-                            "请按模板填写",
-                        )
-                    )
-                relation["row_number"] = row_number
-                relations.append(relation)
-
-    return len(rows), errors, records, relations
+        )
+    return len(records), errors, records
 
 
 def _job_response(job: Job) -> dict[str, Any]:
     payload = job.payload_json or {}
     errors = payload.get("errors", [])
-    terminal = job.status in {"success", "failed", "cancelled"}
     return {
-        "jobId": job.id,
+        "jobId": str(job.id),
         "jobType": job.job_type,
         "status": job.status,
         "totalCount": job.total_count,
         "successCount": job.success_count,
         "failureCount": job.failure_count,
-        "progressPercent": 100 if terminal else 0,
+        "progressPercent": 100 if job.status in {"success", "failed"} else 0,
         "errorFileId": job.error_file,
         "canRetry": False,
         "errorCount": len(errors),
@@ -270,34 +164,27 @@ def _job_response(job: Job) -> dict[str, Any]:
     }
 
 
+def job_response(job: Job) -> dict[str, Any]:
+    return _job_response(job)
+
+
 def create_import_job(
-    session: Session,
-    filename: str,
-    content: bytes,
-    actor: str,
-    request_id: str,
+    session: Session, filename: str, content: bytes, actor: str, request_id: str
 ) -> Job:
     if not filename.lower().endswith(".xlsx"):
-        raise BusinessError("FILE_INVALID", "仅支持 .xlsx 格式的 Excel 文件", 422)
+        raise BusinessError("FILE_INVALID", "仅支持 .xlsx 文件", 422)
     if len(content) > MAX_IMPORT_BYTES:
         raise BusinessError("FILE_TOO_LARGE", "Excel 文件不能超过 10 MB", 413)
-
-    total_count, errors, records, relations = _validate_workbook(content)
-    status = "failed" if errors else "success"
+    total, errors, records = _validate(content)
+    if total > MAX_IMPORT_ROWS:
+        raise BusinessError("VALIDATION_FAILED", "单批导入不能超过 1000 行", 422)
     job = Job(
         job_type="import",
-        status=status,
-        total_count=total_count,
-        success_count=total_count if not errors else 0,
-        failure_count=0 if not errors else total_count,
-        # ponytail: keep validated rows in job JSON for V1.
-        # Move to file storage before larger imports.
-        payload_json={
-            "filename": filename,
-            "errors": errors,
-            "rows": records if not errors else [],
-            "relations": relations if not errors else [],
-        },
+        status="failed" if errors else "success",
+        total_count=total,
+        success_count=0 if errors else total,
+        failure_count=total if errors else 0,
+        payload_json={"filename": filename, "errors": errors, "rows": records},
         created_by=actor,
     )
     session.add(job)
@@ -308,7 +195,7 @@ def create_import_job(
             action="import.create",
             entity_type="job",
             entity_key=str(job.id),
-            summary=filename,
+            affected_knowledge_base_ids=[],
             request_id=request_id,
             created_at=utc_now(),
         )
@@ -325,7 +212,7 @@ def get_job(session: Session, job_id: int) -> Job:
 
 
 def list_job_errors(
-    session: Session, job_id: int, page_num: int = 1, page_size: int = 10
+    session: Session, job_id: int, page_num: int, page_size: int
 ) -> tuple[int, list[dict[str, Any]]]:
     errors = (get_job(session, job_id).payload_json or {}).get("errors", [])
     start = (page_num - 1) * page_size
@@ -340,124 +227,73 @@ def commit_import_job(
     if payload.get("committed"):
         return job
     if job.status != "success":
-        raise BusinessError(
-            "VALIDATION_FAILED", "只有预校验通过的任务才能确认导入", 422
-        )
-
+        raise BusinessError("VALIDATION_FAILED", "预校验未通过，不能提交", 422)
     records = payload.get("rows", [])
-    relations = payload.get("relations", [])
-    if not records:
-        raise BusinessError(
-            "VALIDATION_FAILED", "任务没有可提交的数据，请重新上传 Excel", 422
-        )
-    canonical_ids = [record["canonical_id"] for record in records]
-    existing_ids = set(
+    ids = [row["canonical_id"] for row in records]
+    existing = set(
         session.scalars(
             select(KnowledgeObject.canonical_id).where(
-                KnowledgeObject.canonical_id.in_(canonical_ids)
+                KnowledgeObject.canonical_id.in_(ids)
             )
         )
     )
-    if existing_ids:
+    if existing:
         raise BusinessError(
-            "CONFLICT",
-            f"知识点已存在：{', '.join(sorted(existing_ids)[:5])}",
-            409,
+            "CONFLICT", f"知识点已存在：{', '.join(sorted(existing))}", 409
         )
-
-    known_ids = set(canonical_ids)
-    missing_relation_ids = {
-        value
-        for relation in relations
-        for value in (relation["from_canonical_id"], relation["to_canonical_id"])
-        if value not in known_ids
-    }
-    if missing_relation_ids:
+    all_ids = set(ids)
+    referenced = {item for row in records for item in row["prerequisites"]}
+    missing = (
+        referenced
+        - all_ids
+        - set(
+            session.scalars(
+                select(KnowledgeObject.canonical_id).where(
+                    KnowledgeObject.canonical_id.in_(referenced - all_ids)
+                )
+            )
+        )
+    )
+    if missing:
         raise BusinessError(
             "VALIDATION_FAILED",
-            "前置关系引用不存在的知识点："
-            f"{', '.join(sorted(missing_relation_ids)[:5])}",
+            f"前置关系引用不存在：{', '.join(sorted(missing))}",
             422,
         )
-
-    space, edition = ensure_context(session)
-    knowledge_by_id: dict[str, KnowledgeObject] = {}
+    by_canonical: dict[str, KnowledgeObject] = {}
     try:
-        for record in records:
+        for row in records:
             knowledge = KnowledgeObject(
-                canonical_id=record["canonical_id"],
-                name=record["name"],
-                type=record["type"],
-                grade_term=record["grade_term"],
-                scope=record["scope"],
-                cognitive_level="understand",
-                importance="general",
-                exercise_signature=record["exercise_signature"] or None,
+                canonical_id=row["canonical_id"],
                 created_by=actor,
                 updated_by=actor,
             )
             session.add(knowledge)
             session.flush()
-            _write_terms(
+            _create_revision(
                 session,
                 knowledge,
                 {
-                    "aliases": [],
-                    "core_keywords": [],
-                    "derivative_keywords": [],
-                    "ocr_signals": record["ocr_signals"],
+                    "name": row["name"],
+                    "type": row["type"],
+                    "grade_term": row["grade_term_code"],
+                    "scope": row["scope"],
+                    "ocr_signals": row["ocr_signals"],
+                    "exercise_signature": row["exercise_signature"] or None,
                 },
-            )
-            mapping = TextbookMapping(
-                space_id=space.id,
-                edition_id=edition.id,
-                knowledge_id=knowledge.id,
-                textbook_path=record["pep24_path"],
-                mapping_type="introduction",
-                alignment_type="equivalent",
-                edition_keywords=[],
-            )
-            session.add(mapping)
-            session.flush()
-            _change(
-                session,
-                space.id,
-                "knowledge_object",
-                knowledge.canonical_id,
-                knowledge_payload(session, knowledge),
                 actor,
             )
-            _change(
-                session,
-                space.id,
-                "textbook_mapping",
-                str(mapping.id),
-                mapping_payload(session, mapping),
-                actor,
-            )
-            knowledge_by_id[knowledge.canonical_id] = knowledge
-
-        for item in relations:
-            relation = KnowledgeRelation(
-                space_id=space.id,
-                from_knowledge_id=knowledge_by_id[item["from_canonical_id"]].id,
-                to_knowledge_id=knowledge_by_id[item["to_canonical_id"]].id,
-                relation_type=item["relation_type"],
-                edition_id=edition.id,
-            )
-            session.add(relation)
-            session.flush()
-            _change(
-                session,
-                space.id,
-                "knowledge_relation",
-                str(relation.id),
-                relation_payload(relation),
-                actor,
-            )
-
+            by_canonical[knowledge.canonical_id] = knowledge
+        for row in records:
+            target = by_canonical[row["canonical_id"]]
+            for prerequisite_id in row["prerequisites"]:
+                source = by_canonical.get(prerequisite_id) or session.scalar(
+                    select(KnowledgeObject).where(
+                        KnowledgeObject.canonical_id == prerequisite_id
+                    )
+                )
+                _create_edge(session, source, target, "prerequisite", None, actor)
         payload["committed"] = True
-        payload["committedAt"] = utc_now().isoformat()
         job.payload_json = payload
         session.add(
             AuditLog(
@@ -465,7 +301,7 @@ def commit_import_job(
                 action="import.commit",
                 entity_type="job",
                 entity_key=str(job.id),
-                summary=payload.get("filename"),
+                affected_knowledge_base_ids=[],
                 request_id=request_id,
                 created_at=utc_now(),
             )
@@ -475,7 +311,3 @@ def commit_import_job(
         session.rollback()
         raise
     return job
-
-
-def job_response(job: Job) -> dict[str, Any]:
-    return _job_response(job)

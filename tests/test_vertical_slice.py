@@ -8,275 +8,271 @@ from io import BytesIO
 
 from cryptography.fernet import Fernet
 from openpyxl import Workbook
-from sqlalchemy import event
+from sqlalchemy import select
 
-from app.models import ApiClient
+from app.models import ApiClient, CatalogNode, TextbookEdition
 
 
-def admin_post(client, path: str, payload: dict):
-    response = client.post(path, json=payload)
+def call(client, method: str, path: str, payload: dict | None = None, **kwargs):
+    response = client.request(method, path, json=payload, **kwargs)
     assert response.status_code == 200, response.text
     return response.json()["data"]
 
 
-def seed_group(client):
-    domain = admin_post(
+def seed_catalog(client):
+    kb = call(
         client,
-        "/api/v1/admin/catalog/nodes",
-        {"level": 1, "nodeType": "domain", "title": "数与代数"},
-    )["id"]
-    topic = admin_post(
-        client,
-        "/api/v1/admin/catalog/nodes",
-        {"level": 2, "nodeType": "topic", "title": "数的认识", "parentId": domain},
-    )["id"]
-    unit = admin_post(
-        client,
-        "/api/v1/admin/catalog/nodes",
-        {"level": 3, "nodeType": "unit", "title": "100以内", "parentId": topic},
-    )["id"]
-    group = admin_post(
-        client,
-        "/api/v1/admin/catalog/nodes",
-        {"level": 4, "nodeType": "group", "title": "数数", "parentId": unit},
-    )["id"]
-    return group
-
-
-def seed_release(client):
-    group = seed_group(client)
-    admin_post(
-        client,
-        "/api/v1/admin/knowledge",
+        "POST",
+        "/api/v1/admin/knowledge-bases",
         {
-            "canonicalId": "m.num.count.1_100",
-            "groupNodeId": group,
-            "knowledgeName": "100以内数数",
-            "knowledgeType": "skill",
-            "gradeTerm": "一年级上册",
-            "scope": "core",
-            "cognitiveLevel": "remember",
-            "importance": "core",
-            "coreKeywords": ["数到100"],
-            "ocrSignals": ["数到100"],
+            "name": "人教版2024数学一年级上册",
+            "gradeTermCode": "g1_t1",
+            "subjectCode": "math",
+            "textbookEditionCode": "pep_math_2024_g1_t1",
         },
     )
-    admin_post(
-        client,
-        "/api/v1/admin/textbook-mappings/batch",
-        [
-            {
-                "canonicalId": "m.num.count.1_100",
-                "textbookPath": "一上/数的认识",
-                "mappingType": "introduction",
-            }
-        ],
-    )
-    batch = admin_post(
-        client,
-        "/api/v1/admin/release-batches",
-        {"versionLabel": "2026.08.04.test"},
-    )
-    assert admin_post(
-        client, f"/api/v1/admin/release-batches/{batch['id']}/validate", {}
-    )["passed"]
-    return admin_post(
-        client, f"/api/v1/admin/release-batches/{batch['id']}/publish", {}
-    )
-
-
-def open_headers(
-    client,
-    app_key: str = "app_test",
-    secret: bytes = b"secret",
-    allowed_scopes: list[str] | None = None,
-):
     with client.app.state.session_factory() as session:
-        session.add(
-            ApiClient(
-                app_key=app_key,
-                secret_ciphertext=Fernet(
-                    client.app.state.settings.api_secret_key.encode()
-                )
-                .encrypt(secret)
-                .decode(),
-                allowed_scopes=allowed_scopes or ["read"],
+        edition = session.scalar(
+            select(TextbookEdition).where(
+                TextbookEdition.edition_code == "pep_math_2024_g1_t1"
             )
         )
+        node = CatalogNode(
+            edition_id=edition.id,
+            level=1,
+            node_type="unit",
+            source_key="unit_1",
+            source_path="第一单元/数的认识",
+            title="数的认识",
+            sort_order=1,
+        )
+        session.add(node)
+        session.commit()
+        node_id = node.id
+    return kb, node_id
+
+
+def create_point(client, canonical_id: str, name: str):
+    return call(
+        client,
+        "POST",
+        "/api/v1/admin/knowledge",
+        {
+            "canonicalId": canonical_id,
+            "knowledgeName": name,
+            "knowledgeType": "skill",
+            "gradeTermCode": "g1_t1",
+            "scope": "core",
+            "ocrSignals": [name],
+            "exerciseSignature": "基础题型",
+        },
+    )
+
+
+def map_point(client, kb: dict, node_id: int, canonical_id: str):
+    return call(
+        client,
+        "POST",
+        f"/api/v1/admin/knowledge-bases/{kb['id']}/mappings",
+        {
+            "catalogNodeId": node_id,
+            "canonicalId": canonical_id,
+            "rowVersion": kb["rowVersion"],
+        },
+    )
+
+
+def publish(client, kb_id: str):
+    return call(client, "POST", f"/api/v1/admin/knowledge-bases/{kb_id}/publish")
+
+
+def open_headers(client, path: str, query: str = "", secret: bytes = b"secret"):
+    request_path, embedded_query = (path.split("?", 1) + [""])[:2]
+    if embedded_query and not query:
+        query = embedded_query
+    with client.app.state.session_factory() as session:
+        client_row = session.scalar(
+            select(ApiClient).where(ApiClient.app_key == "app_test")
+        )
+        if client_row is None:
+            session.add(
+                ApiClient(
+                    app_key="app_test",
+                    secret_ciphertext=Fernet(
+                        client.app.state.settings.api_secret_key.encode()
+                    )
+                    .encrypt(secret)
+                    .decode(),
+                    allowed_scopes=["read"],
+                )
+            )
         session.commit()
     timestamp = str(int(time.time()))
     nonce = f"nonce-{time.time_ns()}"
     empty_hash = hashlib.sha256(b"").hexdigest()
+    query_hash = hashlib.sha256(query.encode()).hexdigest()
     canonical = "\n".join(
-        ["GET", "/api/v1/open/knowledge/tree", empty_hash, empty_hash, timestamp, nonce]
+        ["GET", request_path, query_hash, empty_hash, timestamp, nonce]
     ).encode()
     signature = base64.b64encode(
         hmac.new(secret, canonical, hashlib.sha256).digest()
     ).decode()
     return {
-        "X-App-Key": app_key,
+        "X-App-Key": "app_test",
         "X-Timestamp": timestamp,
         "X-Nonce": nonce,
         "X-Signature": signature,
     }
 
 
-def test_publish_and_read_immutable_tree(client):
-    release = seed_release(client)
-    releases = client.get(
-        "/api/v1/admin/releases", params={"pageNum": 1, "pageSize": 20}
-    ).json()["data"]
-    assert releases["total"] == 1
-    assert releases["list"][0]["versionLabel"] == release["versionLabel"]
-    mappings = client.get(
-        "/api/v1/admin/textbook-mappings",
-        params={"pageNum": 1, "pageSize": 20},
-    ).json()["data"]
-    assert mappings["total"] == 1
-    assert mappings["list"][0]["canonicalId"] == "m.num.count.1_100"
-    response = client.get("/api/v1/open/knowledge/tree", headers=open_headers(client))
-    assert response.status_code == 200
-    assert response.json()["meta"]["releaseVersion"] == release["versionLabel"]
-    leaf = response.json()["data"][0]["children"][0]["children"][0]["children"][0][
-        "children"
-    ][0]
-    assert leaf["canonicalId"] == "m.num.count.1_100"
-    assert leaf["status"] == "draft"
-    assert leaf["children"] == []
-
-
-def test_admin_contract_crud_and_relation_groups(client):
-    group = seed_group(client)
-    created = admin_post(
+def test_publish_snapshot_and_point_revision(client):
+    kb, node_id = seed_catalog(client)
+    create_point(client, "m.num.count.1_100", "100以内数数")
+    create_point(client, "m.num.write.1_100", "100以内写数")
+    map_point(client, kb, node_id, "m.num.count.1_100")
+    kb = call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")
+    map_point(client, kb, node_id, "m.num.write.1_100")
+    call(
         client,
-        "/api/v1/admin/knowledge",
-        {
-            "canonicalId": "m.num.count.1_100",
-            "groupNodeId": group,
-            "knowledgeName": "100以内数数",
-            "knowledgeType": "skill",
-            "gradeTerm": "一年级上册",
-            "scope": "core",
-            "cognitiveLevel": "remember",
-            "importance": "core",
-            "aliases": ["数数"],
-            "coreKeywords": ["数到100"],
-        },
-    )
-    assert created["aliases"] == ["数数"]
-    assert created["rowVersion"] == 1
-    patched = client.patch(
-        "/api/v1/admin/knowledge/m.num.count.1_100",
-        json={"knowledgeName": "100以内顺数", "rowVersion": 1},
-    )
-    assert patched.status_code == 200
-    assert patched.json()["data"]["rowVersion"] == 2
-    stale = client.patch(
-        "/api/v1/admin/knowledge/m.num.count.1_100",
-        json={"knowledgeName": "过期修改", "rowVersion": 1},
-    )
-    assert stale.status_code == 409
-    tree = client.get("/api/v1/admin/catalog/tree").json()["data"]
-    assert (
-        tree[0]["children"][0]["children"][0]["children"][0]["children"][0]["level"]
-        == 5
-    )
-    me = client.get(
-        "/api/v1/admin/me",
-        headers={"X-Admin-User": "editor-1", "X-Admin-Roles": "editor"},
-    )
-    assert me.status_code == 200
-    assert "release:publish" not in me.json()["data"]["permissions"]
-
-    admin_post(
-        client,
-        "/api/v1/admin/knowledge",
+        "POST",
+        "/api/v1/admin/relations",
         {
             "canonicalId": "m.num.write.1_100",
-            "groupNodeId": group,
-            "knowledgeName": "100以内写数",
-            "knowledgeType": "skill",
-            "gradeTerm": "一年级上册",
-            "scope": "core",
-            "cognitiveLevel": "understand",
-            "importance": "important",
+            "prerequisiteCanonicalIds": ["m.num.count.1_100"],
         },
     )
-    relation = client.post(
-        "/api/v1/admin/relations/batch",
-        json={
-            "operations": [
-                {
-                    "operation": "add",
-                    "fromCanonicalId": "m.num.count.1_100",
-                    "toCanonicalId": "m.num.write.1_100",
-                    "relationType": "prerequisite",
-                }
-            ]
+    assert call(
+        client,
+        "POST",
+        f"/api/v1/admin/knowledge-bases/{kb['id']}/publish:validate",
+    )["passed"]
+    release = publish(client, kb["id"])
+    detail = client.get(
+        f"/api/v1/admin/knowledge-bases/{kb['id']}/releases/{release['releaseVersion']}"
+    )
+    assert detail.status_code == 200, detail.text
+    point = call(client, "GET", "/api/v1/admin/knowledge/m.num.count.1_100")
+    assert point["status"] == "published"
+    relations = call(client, "GET", "/api/v1/admin/relations")
+    assert relations["list"][1]["status"] == "published"
+    assert relations["list"][1]["prerequisites"] == ["m.num.count.1_100"]
+
+    path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
+    response = client.get(path, headers=open_headers(client, path))
+    assert response.status_code == 200
+    assert response.json()["meta"]["releaseVersion"] == release["releaseVersion"]
+    assert len(response.json()["data"]["knowledge"]) == 2
+
+
+def test_edit_creates_pending_revision_until_next_release(client):
+    kb, node_id = seed_catalog(client)
+    create_point(client, "m.num.count.1_100", "100以内数数")
+    map_point(client, kb, node_id, "m.num.count.1_100")
+    first = publish(client, kb["id"])
+    edited = call(
+        client,
+        "PATCH",
+        "/api/v1/admin/knowledge/m.num.count.1_100",
+        {"knowledgeName": "100以内顺数", "rowVersion": 1},
+    )
+    assert edited["status"] == "pending"
+    assert edited["latestFormal"]["knowledgeName"] == "100以内数数"
+    path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
+    old = client.get(path, headers=open_headers(client, path)).json()["data"]
+    assert old["knowledge"][0]["knowledgeName"] == "100以内数数"
+    second = publish(client, kb["id"])
+    assert second["versionNo"] == first["versionNo"] + 1
+    current = call(client, "GET", "/api/v1/admin/knowledge/m.num.count.1_100")
+    assert current["status"] == "published"
+    assert (
+        current["currentFormalVersions"][-1]["releaseVersion"]
+        == second["releaseVersion"]
+    )
+    rolled_back = call(
+        client,
+        "POST",
+        f"/api/v1/admin/knowledge-bases/{kb['id']}/releases/{first['releaseVersion']}:rollback",
+        {"reason": "恢复首个正式版本"},
+    )
+    assert rolled_back["releaseType"] == "rollback"
+    assert (
+        call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")[
+            "currentReleaseVersion"
+        ]
+        == rolled_back["releaseVersion"]
+    )
+
+
+def test_relation_draft_can_be_reverted(client):
+    kb, node_id = seed_catalog(client)
+    create_point(client, "m.num.count.1_100", "100以内数数")
+    create_point(client, "m.num.write.1_100", "100以内写数")
+    map_point(client, kb, node_id, "m.num.count.1_100")
+    kb = call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")
+    map_point(client, kb, node_id, "m.num.write.1_100")
+    relation = call(
+        client,
+        "POST",
+        "/api/v1/admin/relations",
+        {
+            "canonicalId": "m.num.write.1_100",
+            "prerequisiteCanonicalIds": ["m.num.count.1_100"],
         },
+    )[0]
+    publish(client, kb["id"])
+    changed = call(
+        client,
+        "PATCH",
+        f"/api/v1/admin/relations/{relation['relationId']}",
+        {"operation": "upsert", "note": "补充说明", "rowVersion": 1},
     )
-    assert relation.status_code == 200
-    groups = client.get("/api/v1/admin/relations/m.num.write.1_100")
-    assert groups.json()["data"]["prerequisites"] == ["m.num.count.1_100"]
-    relation_page = client.get(
-        "/api/v1/admin/relations/m.num.write.1_100",
-        params={"group": "prerequisites", "pageNum": 1, "pageSize": 20},
-    ).json()["data"]
-    assert relation_page["total"] == 1
-    assert relation_page["list"] == ["m.num.count.1_100"]
-
-    statements = []
-
-    def count_query(*_):
-        statements.append(1)
-
-    event.listen(client.app.state.engine, "before_cursor_execute", count_query)
-    try:
-        knowledge_page = client.get(
-            "/api/v1/admin/knowledge",
-            params={"groupNodeId": group, "pageNum": 2, "pageSize": 1},
-        ).json()["data"]
-    finally:
-        event.remove(client.app.state.engine, "before_cursor_execute", count_query)
-    assert knowledge_page["total"] == 2
-    assert len(knowledge_page["list"]) == 1
-    assert len(statements) == 4
-    search_page = client.get(
-        "/api/v1/admin/knowledge",
-        params={"keyword": "数数", "pageNum": 1, "pageSize": 20},
-    ).json()["data"]
-    assert search_page["total"] == 1
-    assert search_page["list"][0]["canonicalId"] == "m.num.count.1_100"
-
-
-def test_admin_release_changes_and_audit_logs(client):
-    seed_group(client)
-
-    changes = client.get("/api/v1/admin/release-changes")
-    assert changes.status_code == 200
-    assert changes.json()["data"][0]["entityType"] == "catalog_node"
-    assert client.get("/api/v1/admin/audit-logs").json()["data"]["pageSize"] == 10
-
-    first_page = client.get(
-        "/api/v1/admin/audit-logs", params={"pageNum": 1, "pageSize": 2}
+    assert changed["status"] == "pending"
+    restored = call(
+        client,
+        "POST",
+        f"/api/v1/admin/relations/{relation['relationId']}/draft:revert",
     )
-    second_page = client.get(
-        "/api/v1/admin/audit-logs", params={"pageNum": 2, "pageSize": 2}
+    assert restored["status"] == "published"
+    removed = client.delete(
+        f"/api/v1/admin/relations/{relation['relationId']}",
+        params={"rowVersion": restored["rowVersion"]},
     )
-    assert first_page.status_code == 200
-    first_data = first_page.json()["data"]
-    second_data = second_page.json()["data"]
-    assert first_data["total"] == 4
-    assert first_data["pageSize"] == 2
-    assert len(first_data["list"]) == 2
-    assert first_data["list"][0]["actorType"] == "admin"
-    assert first_data["list"][0]["resourceType"] == "catalog_node"
-    assert {item["id"] for item in first_data["list"]}.isdisjoint(
-        {item["id"] for item in second_data["list"]}
+    assert removed.status_code == 200, removed.text
+    target = call(
+        client,
+        "GET",
+        "/api/v1/admin/relations",
+        params={"canonicalId": "m.num.write.1_100"},
+    )
+    assert target["list"][0]["status"] == "pending"
+    call(
+        client,
+        "POST",
+        f"/api/v1/admin/relations/{relation['relationId']}/draft:revert",
     )
 
 
-def test_admin_import_prevalidates_xlsx(client):
+def test_offline_blocks_default_open_read_but_keeps_history(client):
+    kb, node_id = seed_catalog(client)
+    create_point(client, "m.num.count.1_100", "100以内数数")
+    map_point(client, kb, node_id, "m.num.count.1_100")
+    release = publish(client, kb["id"])
+    call(client, "POST", f"/api/v1/admin/knowledge-bases/{kb['id']}/offline")
+    path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
+    headers = open_headers(client, path)
+    assert client.get(path, headers=headers).status_code == 404
+    query = f"releaseVersion={release['releaseVersion']}"
+    historical_path = f"{path}?{query}"
+    assert (
+        client.get(
+            historical_path,
+            headers=open_headers(client, historical_path, query),
+        ).status_code
+        == 200
+    )
+
+
+def test_import_uses_current_excel_fields_and_creates_prerequisite(client):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "knowledge_points"
@@ -302,84 +298,43 @@ def test_admin_import_prevalidates_xlsx(client):
             "core",
             "一上/数的认识",
             '["数到100"]',
-            None,
+            "数数题",
             "[]",
+        ]
+    )
+    sheet.append(
+        [
+            "m.num.write.1_100",
+            "skill",
+            "100以内写数",
+            "一年级上册",
+            "core",
+            "一上/数的认识",
+            '["写数"]',
+            "写数题",
+            '["m.num.count.1_100"]',
         ]
     )
     content = BytesIO()
     workbook.save(content)
-
     response = client.post(
         "/api/v1/admin/imports",
-        files={
-            "file": (
-                "knowledge.xlsx",
-                content.getvalue(),
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        },
+        files={"file": ("knowledge.xlsx", content.getvalue(), "application/xlsx")},
     )
     assert response.status_code == 200, response.text
     job = response.json()["data"]
-    assert job["status"] == "success"
-    assert job["totalCount"] == 1
-    assert job["errorCount"] == 0
-    assert client.get(f"/api/v1/admin/jobs/{job['jobId']}").json()["data"] == job
-    errors = client.get(
-        f"/api/v1/admin/jobs/{job['jobId']}/errors",
-        params={"pageNum": 1, "pageSize": 20},
-    ).json()["data"]
-    assert errors["total"] == 0
-    assert errors["list"] == []
-
     committed = client.post(f"/api/v1/admin/imports/{job['jobId']}/commit")
     assert committed.status_code == 200, committed.text
-    assert committed.json()["data"]["committed"] is True
-    knowledge = client.get("/api/v1/admin/knowledge/m.num.count.1_100").json()["data"]
-    assert knowledge["knowledgeName"] == "100以内数数"
-    assert knowledge["textbookMappings"][0]["textbookPath"] == "一上/数的认识"
-
-
-def test_publish_validation_blocks_missing_textbook_mapping(client):
-    group = seed_group(client)
-    admin_post(
-        client,
-        "/api/v1/admin/knowledge",
-        {
-            "canonicalId": "m.shape.solid.cuboid",
-            "groupNodeId": group,
-            "knowledgeName": "长方体",
-            "knowledgeType": "concept",
-            "gradeTerm": "一年级上册",
-            "scope": "core",
-            "cognitiveLevel": "remember",
-            "importance": "core",
-        },
+    point = call(client, "GET", "/api/v1/admin/knowledge/m.num.write.1_100")
+    assert point["ocrSignals"] == ["写数"]
+    relations = call(client, "GET", "/api/v1/admin/relations")
+    target = next(
+        row for row in relations["list"] if row["canonicalId"] == "m.num.write.1_100"
     )
-    batch = admin_post(
-        client,
-        "/api/v1/admin/release-batches",
-        {"versionLabel": "2026.08.04.invalid"},
-    )
-    response = client.post(f"/api/v1/admin/release-batches/{batch['id']}/validate")
-    assert response.status_code == 200
-    assert response.json()["data"]["passed"] is False
-    assert "教材映射" in response.json()["data"]["errors"][0]["reason"]
+    assert target["prerequisites"] == ["m.num.count.1_100"]
 
 
-def test_hmac_nonce_cannot_be_replayed(client):
-    seed_release(client)
-    headers = open_headers(client)
-    assert client.get("/api/v1/open/knowledge/tree", headers=headers).status_code == 200
-    replay = client.get("/api/v1/open/knowledge/tree", headers=headers)
-    assert replay.status_code == 401
-    assert replay.json()["code"] == "AUTH_FAILED"
-
-
-def test_open_scope_is_required(client):
-    response = client.get(
-        "/api/v1/open/knowledge/tree",
-        headers=open_headers(client, "app_without_read", allowed_scopes=["write"]),
-    )
+def test_v1_admin_identity_is_admin_only(client):
+    response = client.get("/api/v1/admin/me", headers={"X-Admin-Roles": "editor"})
     assert response.status_code == 403
-    assert response.json()["code"] == "FORBIDDEN"
+    assert client.get("/api/v1/admin/me").json()["data"]["roles"] == ["admin"]

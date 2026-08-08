@@ -9,12 +9,15 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from app.api.admin import router as admin_router
+from app.api.admin_jobs import router as admin_jobs_router
+from app.api.admin_release import router as admin_release_router
 from app.api.open import router as open_router
 from app.core.config import Settings
 from app.core.db import create_database_engine
 from app.core.errors import BusinessError
 from app.core.response import failure
 from app.models import Base
+from app.modules.catalog.service import seed_textbook_editions
 
 
 def create_app(database_url: str | None = None, create_schema: bool = False) -> FastAPI:
@@ -30,6 +33,9 @@ def create_app(database_url: str | None = None, create_schema: bool = False) -> 
     app.state.session_factory = sessionmaker(
         bind=engine, autoflush=False, expire_on_commit=False
     )
+    if create_schema:
+        with app.state.session_factory() as session:
+            seed_textbook_editions(session)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -74,6 +80,8 @@ def create_app(database_url: str | None = None, create_schema: bool = False) -> 
         return {"status": "ready"}
 
     app.include_router(admin_router)
+    app.include_router(admin_jobs_router)
+    app.include_router(admin_release_router)
     app.include_router(open_router)
     return app
 

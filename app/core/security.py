@@ -26,13 +26,6 @@ class AdminIdentity:
 
 
 ROLE_PERMISSIONS = {
-    "editor": ("knowledge:read", "knowledge:write", "release:validate"),
-    "publisher": (
-        "knowledge:read",
-        "knowledge:write",
-        "release:validate",
-        "release:publish",
-    ),
     "admin": (
         "knowledge:read",
         "knowledge:write",
@@ -50,10 +43,10 @@ def admin_identity(request: Request) -> AdminIdentity:
     roles = tuple(
         role.strip()
         for role in request.headers.get("X-Admin-Roles", "admin").split(",")
-        if role.strip() in ROLE_PERMISSIONS
+        if role.strip() == "admin"
     )
-    if not roles:
-        raise BusinessError("FORBIDDEN", "当前用户没有管理端角色", 403)
+    if roles != ("admin",):
+        raise BusinessError("FORBIDDEN", "当前版本仅支持管理员身份", 403)
     return AdminIdentity(
         user_id=request.headers.get("X-Admin-User", "local-admin"),
         display_name=request.headers.get("X-Admin-Name", "本地管理员"),

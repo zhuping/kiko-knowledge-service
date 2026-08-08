@@ -1,321 +1,302 @@
 from __future__ import annotations
 
-from typing import Literal
-
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.response import success
-from app.core.security import (
-    AdminIdentity,
-    admin_identity,
-    require_admin,
-    require_roles,
-)
+from app.core.security import AdminIdentity, admin_identity, require_admin
+from app.models import KnowledgeObject, RelationRevision
 from app.modules.catalog.service import (
-    apply_relation_batch,
-    attach_knowledge,
-    create_knowledge,
+    catalog_tree,
+    create_knowledge_base,
     create_mapping,
-    create_node,
-    create_policy_mapping,
+    delete_knowledge_base,
+    delete_mapping,
+    get_knowledge_base,
+    get_textbook_edition,
+    list_knowledge_bases,
+    list_mappings,
+    list_textbook_editions,
+    update_knowledge_base,
+)
+from app.modules.knowledge.service import (
+    create_knowledge,
+    delete_knowledge,
     get_knowledge,
     knowledge_response,
     list_knowledge,
-    move_knowledge_node,
-    move_node,
-    page_mappings,
-    page_policy_mappings,
-    page_relation_group,
-    relation_groups,
-    tree_payload,
+    revert_knowledge,
     update_knowledge,
-    update_node,
-    update_status_batch,
 )
-from app.modules.import_export.service import (
-    commit_import_job,
-    create_import_job,
-    get_job,
-    job_response,
-    list_job_errors,
-)
-from app.modules.release.service import (
-    create_batch,
-    list_audit_logs,
-    list_release_changes,
-    list_releases,
-    publish_batch,
-    validate_batch,
+from app.modules.relation.query import list_relations
+from app.modules.relation.service import (
+    create_relation_group,
+    delete_relation,
+    get_relation,
+    patch_relation,
+    relation_group_response,
+    revert_relation,
 )
 from app.schemas.catalog import (
-    CatalogKnowledgeAttach,
-    CatalogNodeCreate,
-    CatalogNodeMove,
-    CatalogNodeUpdate,
-    GradeTerm,
+    KnowledgeBaseCreate,
+    KnowledgeBaseStatus,
+    KnowledgeBaseUpdate,
     KnowledgeCreate,
-    KnowledgeNodeMove,
-    KnowledgeScope,
-    KnowledgeStatus,
-    KnowledgeStatusBatch,
-    KnowledgeType,
+    KnowledgeSearch,
     KnowledgeUpdate,
-    PolicyMappingCreate,
-    RelationBatch,
-    TextbookMappingCreate,
+    MappingCreate,
+    RelationCreate,
+    RelationSearch,
+    RelationUpdate,
 )
-from app.schemas.release import ReleaseBatchCreate
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 
-def request_id(request: Request) -> str:
+def _request_id(request: Request) -> str:
     return request.state.request_id
 
 
-def page_response(total: int, page_num: int, page_size: int, items: list):
-    return {"total": total, "pageNum": page_num, "pageSize": page_size, "list": items}
+def _page(total: int, page_num: int, page_size: int, rows: list) -> dict:
+    return {
+        "total": total,
+        "pageNum": page_num,
+        "pageSize": page_size,
+        "list": rows,
+    }
 
 
 @router.get("/me")
 def current_user(request: Request, identity: AdminIdentity = Depends(admin_identity)):
-    permissions = sorted(
-        {permission for role in identity.roles for permission in _permissions(role)}
-    )
     return success(
         {
             "userId": identity.user_id,
             "displayName": identity.display_name,
-            "roles": list(identity.roles),
-            "permissions": permissions,
+            "roles": ["admin"],
+            "permissions": [
+                "knowledge:read",
+                "knowledge:write",
+                "mapping:write",
+                "relation:write",
+                "release:write",
+                "audit:read",
+            ],
         },
-        request_id(request),
+        _request_id(request),
     )
 
 
-@router.post("/imports")
-async def create_import(
+@router.get("/knowledge-bases")
+def knowledge_bases(
     request: Request,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_admin),
-):
-    job = create_import_job(
-        db,
-        file.filename or "",
-        await file.read(),
-        actor,
-        request_id(request),
-    )
-    return success(job_response(job), request_id(request))
-
-
-@router.get("/jobs/{job_id}")
-def job_status(
-    job_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    _identity: AdminIdentity = Depends(admin_identity),
-):
-    return success(job_response(get_job(db, job_id)), request_id(request))
-
-
-@router.get("/jobs/{job_id}/errors")
-def job_errors(
-    job_id: int,
-    request: Request,
+    grade_term_code: str | None = Query(None, alias="gradeTermCode"),
+    subject_code: str | None = Query(None, alias="subjectCode"),
+    textbook_edition_code: str | None = Query(None, alias="textbookEditionCode"),
+    status: KnowledgeBaseStatus | None = None,
     page_num: int = Query(1, alias="pageNum", ge=1),
     page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
-    total, items = list_job_errors(db, job_id, page_num, page_size)
-    return success(
-        page_response(total, page_num, page_size, items), request_id(request)
+    total, rows = list_knowledge_bases(
+        db,
+        grade_term_code,
+        subject_code,
+        textbook_edition_code,
+        status,
+        page_num,
+        page_size,
     )
+    return success(_page(total, page_num, page_size, rows), _request_id(request))
 
 
-@router.post("/imports/{job_id}/commit")
-def commit_import(
-    job_id: int,
+@router.post("/knowledge-bases")
+def create_kb(
+    payload: KnowledgeBaseCreate,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    job = commit_import_job(db, job_id, actor, request_id(request))
-    return success(job_response(job), request_id(request))
+    return success(
+        create_knowledge_base(db, payload, actor, _request_id(request)),
+        _request_id(request),
+    )
 
 
-def _permissions(role: str) -> tuple[str, ...]:
-    from app.core.security import ROLE_PERMISSIONS
-
-    return ROLE_PERMISSIONS[role]
-
-
-@router.get("/catalog/tree")
-def catalog_tree(
+@router.get("/knowledge-bases/{kb_id}")
+def get_kb(
+    kb_id: int,
     request: Request,
-    edition_code: str = Query("pep_math_2024_63", alias="editionCode"),
-    space_code: str = Query("default", alias="spaceCode"),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
-    return success(tree_payload(db, space_code, edition_code), request_id(request))
+    from app.modules.catalog.service import _kb_response
+
+    return success(
+        _kb_response(db, get_knowledge_base(db, kb_id)), _request_id(request)
+    )
 
 
-@router.post("/catalog/nodes")
-def create_catalog_node(
-    payload: CatalogNodeCreate,
+@router.patch("/knowledge-bases/{kb_id}")
+def patch_kb(
+    kb_id: int,
+    payload: KnowledgeBaseUpdate,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    node = create_node(db, payload, actor)
     return success(
-        {
-            "id": node.id,
-            "parentId": node.parent_id,
-            "level": node.level,
-            "nodeType": node.node_type,
-            "title": node.title,
-            "sortOrder": node.sort_order,
-            "status": node.status,
-            "rowVersion": node.row_version,
-        },
-        request_id(request),
+        update_knowledge_base(db, kb_id, payload, actor, _request_id(request)),
+        _request_id(request),
     )
 
 
-@router.patch("/catalog/nodes/{node_id}")
-def patch_catalog_node(
-    node_id: int,
-    payload: CatalogNodeUpdate,
+@router.delete("/knowledge-bases/{kb_id}")
+def remove_kb(
+    kb_id: int,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    node = update_node(db, node_id, payload, actor)
-    return success(
-        {
-            "id": node.id,
-            "title": node.title,
-            "status": node.status,
-            "rowVersion": node.row_version,
-        },
-        request_id(request),
+    delete_knowledge_base(db, kb_id, actor, _request_id(request))
+    return success({"deleted": True}, _request_id(request))
+
+
+@router.get("/textbook-editions")
+def textbook_editions(
+    request: Request,
+    subject_code: str | None = Query(None, alias="subjectCode"),
+    grade_term_code: str | None = Query(None, alias="gradeTermCode"),
+    page_num: int = Query(1, alias="pageNum", ge=1),
+    page_size: int = Query(100, alias="pageSize", ge=1, le=100),
+    db: Session = Depends(get_db),
+    _identity: AdminIdentity = Depends(admin_identity),
+):
+    total, rows = list_textbook_editions(
+        db, subject_code, grade_term_code, page_num, page_size
     )
+    return success(_page(total, page_num, page_size, rows), _request_id(request))
 
 
-@router.post("/catalog/nodes/{node_id}/move")
-def move_catalog_node(
-    node_id: int,
-    payload: CatalogNodeMove,
+@router.get("/textbook-editions/{edition_code}/catalog")
+def textbook_catalog(
+    edition_code: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _identity: AdminIdentity = Depends(admin_identity),
+):
+    return success(catalog_tree(db, edition_code), _request_id(request))
+
+
+@router.get("/textbook-editions/{edition_code}")
+def textbook_edition_detail(
+    edition_code: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _identity: AdminIdentity = Depends(admin_identity),
+):
+    return success(get_textbook_edition(db, edition_code), _request_id(request))
+
+
+@router.get("/knowledge-bases/{kb_id}/mappings")
+def mappings(
+    kb_id: int,
+    request: Request,
+    catalog_node_id: int | None = Query(None, alias="catalogNodeId"),
+    db: Session = Depends(get_db),
+    _identity: AdminIdentity = Depends(admin_identity),
+):
+    get_knowledge_base(db, kb_id)
+    return success(list_mappings(db, kb_id, catalog_node_id), _request_id(request))
+
+
+@router.post("/knowledge-bases/{kb_id}/mappings")
+def add_mapping(
+    kb_id: int,
+    payload: MappingCreate,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    node = move_node(db, node_id, payload, actor)
     return success(
-        {"id": node.id, "sortOrder": node.sort_order, "rowVersion": node.row_version},
-        request_id(request),
+        create_mapping(db, kb_id, payload, actor, _request_id(request)),
+        _request_id(request),
     )
 
 
-@router.post("/catalog/knowledge-nodes")
-def attach_catalog_knowledge(
-    payload: CatalogKnowledgeAttach,
+@router.delete("/knowledge-bases/{kb_id}/mappings/{mapping_id}")
+def remove_mapping(
+    kb_id: int,
+    mapping_id: int,
     request: Request,
+    row_version: int = Query(..., alias="rowVersion"),
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    item = attach_knowledge(db, payload, actor)
-    return success(
-        {
-            "id": item.id,
-            "groupNodeId": item.group_node_id,
-            "rowVersion": item.row_version,
-        },
-        request_id(request),
-    )
-
-
-@router.post("/catalog/knowledge-nodes/{node_id}/move")
-def move_catalog_knowledge(
-    node_id: int,
-    payload: KnowledgeNodeMove,
-    request: Request,
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_admin),
-):
-    item = move_knowledge_node(db, node_id, payload, actor)
-    return success(
-        {"id": item.id, "sortOrder": item.sort_order, "rowVersion": item.row_version},
-        request_id(request),
-    )
+    delete_mapping(db, kb_id, mapping_id, row_version, actor, _request_id(request))
+    return success({"deleted": True}, _request_id(request))
 
 
 @router.get("/knowledge")
 def knowledge_list(
     request: Request,
-    keyword: str | None = Query(None),
+    keyword: str | None = None,
     canonical_id: str | None = Query(None, alias="canonicalId"),
-    grade_term: GradeTerm | None = Query(None, alias="gradeTerm"),
-    knowledge_type: KnowledgeType | None = Query(None, alias="knowledgeType"),
-    scope: KnowledgeScope | None = Query(None),
-    status: KnowledgeStatus | None = Query(None),
-    group_node_id: int | None = Query(None, alias="groupNodeId"),
+    grade_term_code: str | None = Query(None, alias="gradeTermCode"),
+    textbook_edition_code: str | None = Query(None, alias="textbookEditionCode"),
+    knowledge_type: str | None = Query(None, alias="knowledgeType"),
+    scope: str | None = None,
+    knowledge_base_id: int | None = Query(None, alias="knowledgeBaseId"),
+    status: str | None = None,
     page_num: int = Query(1, alias="pageNum", ge=1),
     page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
-    total, items = list_knowledge(
-        db,
+    data = KnowledgeSearch(
         keyword=keyword,
         canonical_id=canonical_id,
-        grade_term=grade_term,
+        grade_term_code=grade_term_code,
+        textbook_edition_code=textbook_edition_code,
         knowledge_type=knowledge_type,
         scope=scope,
+        knowledge_base_id=knowledge_base_id,
         status=status,
-        group_node_id=group_node_id,
         page_num=page_num,
         page_size=page_size,
     )
-    return success(
-        page_response(total, page_num, page_size, items),
-        request_id(request),
-    )
+    total, rows = list_knowledge(db, data)
+    return success(_page(total, page_num, page_size, rows), _request_id(request))
 
 
 @router.post("/knowledge")
-def create_knowledge_object(
+def add_knowledge(
     payload: KnowledgeCreate,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
     return success(
-        knowledge_response(db, create_knowledge(db, payload, actor)),
-        request_id(request),
+        create_knowledge(db, payload, actor, _request_id(request)),
+        _request_id(request),
     )
 
 
 @router.get("/knowledge/{canonical_id}")
-def get_knowledge_object(
+def knowledge_detail(
     canonical_id: str,
     request: Request,
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
     return success(
-        knowledge_response(db, get_knowledge(db, canonical_id)), request_id(request)
+        knowledge_response(db, get_knowledge(db, canonical_id)), _request_id(request)
     )
 
 
 @router.patch("/knowledge/{canonical_id}")
-def patch_knowledge_object(
+def edit_knowledge(
     canonical_id: str,
     payload: KnowledgeUpdate,
     request: Request,
@@ -323,226 +304,133 @@ def patch_knowledge_object(
     actor: str = Depends(require_admin),
 ):
     return success(
-        knowledge_response(db, update_knowledge(db, canonical_id, payload, actor)),
-        request_id(request),
+        update_knowledge(db, canonical_id, payload, actor, _request_id(request)),
+        _request_id(request),
     )
 
 
-@router.post("/knowledge/status:batch")
-def patch_knowledge_status(
-    payload: KnowledgeStatusBatch,
-    request: Request,
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_admin),
-):
-    return success(
-        [
-            knowledge_response(db, item)
-            for item in update_status_batch(db, payload, actor)
-        ],
-        request_id(request),
-    )
-
-
-@router.get("/relations/{canonical_id}")
-def get_relations(
+@router.delete("/knowledge/{canonical_id}")
+def remove_knowledge(
     canonical_id: str,
     request: Request,
-    group: Literal["prerequisites", "successors", "parallel", "cross"] | None = Query(
-        None
-    ),
-    page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
+    row_version: int = Query(..., alias="rowVersion"),
     db: Session = Depends(get_db),
-    _identity: AdminIdentity = Depends(admin_identity),
+    actor: str = Depends(require_admin),
 ):
-    if group is None:
-        return success(
-            {"canonicalId": canonical_id, **relation_groups(db, canonical_id)},
-            request_id(request),
-        )
-    total, items = page_relation_group(db, canonical_id, group, page_num, page_size)
-    return success(
-        page_response(total, page_num, page_size, items), request_id(request)
-    )
+    delete_knowledge(db, canonical_id, row_version, actor, _request_id(request))
+    return success({"deleted": True}, _request_id(request))
 
 
-@router.post("/relations/batch")
-def create_knowledge_relations(
-    payload: RelationBatch,
+@router.post("/knowledge/{canonical_id}/draft:revert")
+def restore_knowledge(
+    canonical_id: str,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    relations = apply_relation_batch(db, payload, actor)
     return success(
-        {"created": len(relations), "ids": [item.id for item in relations]},
-        request_id(request),
+        revert_knowledge(db, canonical_id, actor, _request_id(request)),
+        _request_id(request),
     )
 
 
-@router.get("/textbook-mappings")
-def textbook_mappings(
-    request: Request,
-    edition_code: str | None = Query(None, alias="editionCode"),
-    canonical_id: str | None = Query(None, alias="canonicalId"),
-    page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
-    db: Session = Depends(get_db),
-    _identity: AdminIdentity = Depends(admin_identity),
-):
-    total, items = page_mappings(db, edition_code, canonical_id, page_num, page_size)
-    return success(
-        page_response(total, page_num, page_size, items), request_id(request)
-    )
-
-
-@router.post("/textbook-mappings/batch")
-def create_textbook_mappings(
-    payload: list[TextbookMappingCreate],
-    request: Request,
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_admin),
-):
-    mappings = [create_mapping(db, item, actor) for item in payload]
-    return success(
-        {"created": len(mappings), "ids": [item.id for item in mappings]},
-        request_id(request),
-    )
-
-
-@router.get("/policy-mappings")
-def policy_mappings(
+@router.get("/relations")
+def relation_list(
     request: Request,
     canonical_id: str | None = Query(None, alias="canonicalId"),
+    knowledge_name: str | None = Query(None, alias="knowledgeName"),
+    grade_term_code: str | None = Query(None, alias="gradeTermCode"),
+    knowledge_type: str | None = Query(None, alias="knowledgeType"),
+    knowledge_base_id: int | None = Query(None, alias="knowledgeBaseId"),
+    status: str | None = None,
     page_num: int = Query(1, alias="pageNum", ge=1),
     page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
-    total, items = page_policy_mappings(db, canonical_id, page_num, page_size)
-    return success(
-        page_response(total, page_num, page_size, items), request_id(request)
+    data = RelationSearch(
+        canonical_id=canonical_id,
+        knowledge_name=knowledge_name,
+        grade_term_code=grade_term_code,
+        knowledge_type=knowledge_type,
+        knowledge_base_id=knowledge_base_id,
+        status=status,
+        page_num=page_num,
+        page_size=page_size,
     )
+    total, rows = list_relations(db, data)
+    return success(_page(total, page_num, page_size, rows), _request_id(request))
 
 
-@router.post("/policy-mappings/batch")
-def create_policy_mappings(
-    payload: list[PolicyMappingCreate],
+@router.post("/relations")
+def add_relation(
+    payload: RelationCreate,
     request: Request,
     db: Session = Depends(get_db),
     actor: str = Depends(require_admin),
 ):
-    mappings = [create_policy_mapping(db, item, actor) for item in payload]
     return success(
-        {"created": len(mappings), "ids": [item.id for item in mappings]},
-        request_id(request),
+        create_relation_group(db, payload, actor, _request_id(request)),
+        _request_id(request),
     )
 
 
-@router.post("/release-batches")
-def create_release_batch(
-    payload: ReleaseBatchCreate,
+@router.get("/relations/{relation_id}")
+def relation_detail(
+    relation_id: int,
     request: Request,
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_admin),
-):
-    batch = create_batch(
-        db,
-        payload.space_code,
-        payload.version_label,
-        payload.release_note,
-        payload.change_log_ids,
-        actor,
-    )
-    return success(
-        {
-            "id": batch.id,
-            "versionLabel": batch.version_label,
-            "validationStatus": batch.validation_status,
-            "status": batch.status,
-        },
-        request_id(request),
-    )
-
-
-@router.post("/release-batches/{batch_id}/validate")
-def validate_release_batch(
-    batch_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    _identity: AdminIdentity = Depends(require_roles("editor", "publisher", "admin")),
-):
-    errors = validate_batch(db, batch_id)
-    return success({"passed": not errors, "errors": errors}, request_id(request))
-
-
-@router.post("/release-batches/{batch_id}/publish")
-def publish_release_batch(
-    batch_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_roles("publisher", "admin")),
-):
-    version = publish_batch(db, batch_id, actor.user_id)
-    return success(
-        {
-            "versionLabel": version.version_label,
-            "contentHash": version.content_hash,
-            "publishedAt": version.published_at.isoformat(),
-        },
-        request_id(request),
-        version.version_label,
-    )
-
-
-@router.get("/releases")
-def releases(
-    request: Request,
-    page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
     _identity: AdminIdentity = Depends(admin_identity),
 ):
-    total, rows = list_releases(db, page_num, page_size)
     return success(
-        page_response(
-            total,
-            page_num,
-            page_size,
-            [
-                {
-                    "versionLabel": item.version_label,
-                    "releaseType": item.release_type,
-                    "contentHash": item.content_hash,
-                    "publishedBy": item.published_by,
-                    "publishedAt": item.published_at.isoformat(),
-                }
-                for item in rows
-            ],
+        relation_group_response(
+            db, get_knowledge(db, _relation_main_canonical(db, relation_id))
         ),
-        request_id(request),
+        _request_id(request),
     )
 
 
-@router.get("/release-changes")
-def release_changes(
-    request: Request,
-    db: Session = Depends(get_db),
-    _identity: AdminIdentity = Depends(admin_identity),
-):
-    return success(list_release_changes(db), request_id(request))
+def _relation_main_canonical(db: Session, relation_id: int) -> str:
+    relation = get_relation(db, relation_id)
+    revision = db.get(RelationRevision, relation.latest_revision_id)
+    source = db.get(KnowledgeObject, revision.from_knowledge_id)
+    return source.canonical_id
 
 
-@router.get("/audit-logs")
-def audit_logs(
+@router.patch("/relations/{relation_id}")
+def edit_relation(
+    relation_id: int,
+    payload: RelationUpdate,
     request: Request,
-    page_num: int = Query(1, alias="pageNum", ge=1),
-    page_size: int = Query(10, alias="pageSize", ge=1, le=100),
     db: Session = Depends(get_db),
-    _identity: AdminIdentity = Depends(admin_identity),
+    actor: str = Depends(require_admin),
 ):
-    total, items = list_audit_logs(db, page_num, page_size)
     return success(
-        page_response(total, page_num, page_size, items), request_id(request)
+        patch_relation(db, relation_id, payload, actor, _request_id(request)),
+        _request_id(request),
+    )
+
+
+@router.delete("/relations/{relation_id}")
+def remove_relation(
+    relation_id: int,
+    request: Request,
+    row_version: int = Query(..., alias="rowVersion"),
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_admin),
+):
+    delete_relation(db, relation_id, row_version, actor, _request_id(request))
+    return success({"deleted": True}, _request_id(request))
+
+
+@router.post("/relations/{relation_id}/draft:revert")
+def restore_relation(
+    relation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_admin),
+):
+    return success(
+        revert_relation(db, relation_id, actor, _request_id(request)),
+        _request_id(request),
     )

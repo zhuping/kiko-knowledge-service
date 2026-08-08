@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any, Optional
 
@@ -20,7 +22,6 @@ class Job(TimestampMixin, Base):
         JSON, default=dict, nullable=False
     )
     error_file: Mapped[Optional[str]] = mapped_column(String(500))
-    last_error: Mapped[Optional[str]] = mapped_column(String(1000))
     created_by: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
@@ -37,7 +38,6 @@ class ApiClient(TimestampMixin, Base):
     rate_limit_per_minute: Mapped[int] = mapped_column(
         Integer, default=1000, nullable=False
     )
-    last_rotated_at: Mapped[Optional[datetime]] = mapped_column()
 
 
 class ApiNonce(Base):
@@ -65,10 +65,13 @@ class AuditLog(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
     entity_type: Mapped[Optional[str]] = mapped_column(String(40))
     entity_key: Mapped[Optional[str]] = mapped_column(String(128))
-    summary: Mapped[Optional[str]] = mapped_column(String(1000))
-    result: Mapped[str] = mapped_column(String(20), default="success", nullable=False)
+    before_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
+    after_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
+    affected_knowledge_base_ids: Mapped[list[int]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
     request_id: Mapped[Optional[str]] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(nullable=False)

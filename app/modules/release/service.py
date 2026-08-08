@@ -3,8 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -12,77 +11,75 @@ from sqlalchemy.orm import Session
 from app.core.errors import BusinessError
 from app.models import (
     AuditLog,
-    ChangeLog,
-    ContentSpace,
+    CatalogNode,
+    KnowledgeBase,
+    KnowledgeBaseMapping,
+    KnowledgeObject,
+    KnowledgeRelation,
+    KnowledgeRevision,
+    RelationRevision,
     ReleaseBatch,
-    ReleaseBatchItem,
+    ReleaseCatalogNode,
     ReleaseCurrent,
-    ReleaseSnapshot,
+    ReleaseKnowledge,
+    ReleaseMapping,
+    ReleaseRelation,
     ReleaseVersion,
 )
 from app.models.base import utc_now
 
 
-def _content_hash(document: dict[str, dict[str, dict[str, Any]]]) -> str:
-    raw = json.dumps(
-        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+def _hash(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def current_version(session: Session) -> ReleaseVersion | None:
-    current = session.get(ReleaseCurrent, 1)
-    return session.get(ReleaseVersion, current.release_id) if current else None
-
-
-def snapshot_document(
-    session: Session, release_id: int | None
-) -> dict[str, dict[str, dict[str, Any]]]:
-    document: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    if release_id is None:
-        return document
-    for row in session.scalars(
-        select(ReleaseSnapshot).where(ReleaseSnapshot.release_id == release_id)
-    ):
-        document[row.entity_type][row.entity_key] = row.payload
-    return document
-
-
-def _selected_changes(session: Session, batch: ReleaseBatch) -> list[ChangeLog]:
-    items = list(
-        session.scalars(
-            select(ReleaseBatchItem).where(ReleaseBatchItem.batch_id == batch.id)
+def _audit(
+    session: Session, actor: str, action: str, key: str, request_id: str, kb_id: int
+):
+    session.add(
+        AuditLog(
+            actor_id=actor,
+            action=action,
+            entity_type="release_version",
+            entity_key=key,
+            affected_knowledge_base_ids=[kb_id],
+            request_id=request_id,
+            created_at=utc_now(),
         )
     )
-    changes: list[ChangeLog] = []
-    for item in items:
-        change = session.get(ChangeLog, item.change_log_id)
-        if change is None or change.after_hash != item.selected_hash:
-            raise BusinessError("CONFLICT", "发布批次引用的草稿已发生变化", 409)
-        changes.append(change)
-    return changes
 
 
-def candidate_document(
-    session: Session, batch: ReleaseBatch
-) -> dict[str, dict[str, dict[str, Any]]]:
-    document = snapshot_document(session, batch.base_release_id)
-    for change in _selected_changes(session, batch):
-        bucket = document[change.entity_type]
-        if change.operation == "delete":
-            bucket.pop(change.entity_key, None)
-        elif change.after_payload is not None:
-            bucket[change.entity_key] = change.after_payload
-    return document
+def _kb(session: Session, kb_id: int) -> KnowledgeBase:
+    kb = session.get(KnowledgeBase, kb_id)
+    if kb is None:
+        raise BusinessError("NOT_FOUND", "知识库不存在", 404)
+    return kb
 
 
-def _has_prerequisite_cycle(relations: list[dict[str, Any]]) -> bool:
+def _current_revision(
+    session: Session, knowledge: KnowledgeObject
+) -> KnowledgeRevision:
+    revision = session.get(KnowledgeRevision, knowledge.latest_revision_id)
+    if revision is None:
+        raise BusinessError("VALIDATION_FAILED", "知识点缺少有效当前修订", 422)
+    return revision
+
+
+def _relation_revision(
+    session: Session, relation: KnowledgeRelation
+) -> RelationRevision:
+    revision = session.get(RelationRevision, relation.latest_revision_id)
+    if revision is None:
+        raise BusinessError("VALIDATION_FAILED", "关系缺少有效当前修订", 422)
+    return revision
+
+
+def _cycle(revisions: list[RelationRevision]) -> bool:
     graph: dict[int, list[int]] = defaultdict(list)
-    for relation in relations:
-        if relation.get("relation_type") == "prerequisite":
-            graph[int(relation["from_knowledge_id"])].append(
-                int(relation["to_knowledge_id"])
-            )
+    for row in revisions:
+        if row.operation == "upsert" and row.relation_type == "prerequisite":
+            graph[row.from_knowledge_id].append(row.to_knowledge_id)
     visiting: set[int] = set()
     visited: set[int] = set()
 
@@ -92,7 +89,7 @@ def _has_prerequisite_cycle(relations: list[dict[str, Any]]) -> bool:
         if node in visited:
             return False
         visiting.add(node)
-        if any(visit(next_node) for next_node in graph.get(node, [])):
+        if any(visit(child) for child in graph.get(node, [])):
             return True
         visiting.remove(node)
         visited.add(node)
@@ -101,284 +98,403 @@ def _has_prerequisite_cycle(relations: list[dict[str, Any]]) -> bool:
     return any(visit(node) for node in graph)
 
 
-def validate_document(
-    document: dict[str, dict[str, dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-    nodes = document.get("catalog_node", {})
-    knowledge = document.get("knowledge_object", {})
-    attachments = document.get("catalog_knowledge_node", {})
-    mappings = document.get("textbook_mapping", {})
-    relations = list(document.get("knowledge_relation", {}).values())
-
-    for node in nodes.values():
-        level = node.get("level")
-        parent_id = node.get("parent_id")
-        expected_type = {1: "domain", 2: "topic", 3: "unit", 4: "group"}.get(level)
-        if expected_type != node.get("node_type"):
-            errors.append({"entity": node.get("id"), "reason": "层级和节点类型不匹配"})
-        if level == 1 and parent_id is not None:
-            errors.append({"entity": node.get("id"), "reason": "一级节点不能有父节点"})
-        if level and level > 1:
-            parent = nodes.get(str(parent_id))
-            if not parent or parent.get("level") != level - 1:
-                errors.append(
-                    {"entity": node.get("id"), "reason": "父节点不是相邻上一级"}
-                )
-
-    mapped_knowledge_ids: set[int] = set()
-    for mapping in mappings.values():
-        if mapping.get("status") != "disabled":
-            mapped_knowledge_ids.add(int(mapping["knowledge_id"]))
-        if not any(
-            int(item.get("id")) == int(mapping.get("knowledge_id"))
-            for item in knowledge.values()
-        ):
-            errors.append(
-                {"entity": mapping.get("id"), "reason": "教材映射引用不存在的知识对象"}
+def _candidate(session: Session, kb_id: int):
+    kb = _kb(session, kb_id)
+    nodes = list(
+        session.scalars(
+            select(CatalogNode)
+            .where(CatalogNode.edition_id == kb.textbook_edition_id)
+            .order_by(CatalogNode.sort_order, CatalogNode.id)
+        )
+    )
+    mappings = list(
+        session.scalars(
+            select(KnowledgeBaseMapping)
+            .where(KnowledgeBaseMapping.knowledge_base_id == kb_id)
+            .order_by(KnowledgeBaseMapping.id)
+        )
+    )
+    knowledge_ids = {row.knowledge_id for row in mappings}
+    knowledge = (
+        list(
+            session.scalars(
+                select(KnowledgeObject).where(KnowledgeObject.id.in_(knowledge_ids))
             )
-
-    for item in attachments.values():
-        group = nodes.get(str(item.get("group_node_id")))
-        if not group or group.get("level") != 4:
-            errors.append(
-                {"entity": item.get("id"), "reason": "五级知识点必须挂到四级知识点组"}
-            )
-        if not any(
-            int(row.get("id")) == int(item.get("knowledge_id"))
-            for row in knowledge.values()
-        ):
-            errors.append(
-                {"entity": item.get("id"), "reason": "挂载引用不存在的知识对象"}
-            )
-
-    for item in knowledge.values():
+        )
+        if knowledge_ids
+        else []
+    )
+    errors = []
+    by_id = {row.id: row for row in knowledge}
+    node_ids = {row.id for row in nodes}
+    for mapping in mappings:
+        item = by_id.get(mapping.knowledge_id)
+        if item is None:
+            errors.append({"entity": mapping.id, "reason": "映射引用的知识点不存在"})
+        else:
+            _current_revision(session, item)
+        if mapping.catalog_node_id not in node_ids:
+            errors.append({"entity": mapping.id, "reason": "映射目录不属于当前教材"})
+    if errors:
+        raise BusinessError("VALIDATION_FAILED", "发布校验未通过", 422, errors)
+    relations = []
+    for relation in session.scalars(select(KnowledgeRelation)):
+        revision = _relation_revision(session, relation)
         if (
-            item.get("status") != "disabled"
-            and int(item.get("id")) not in mapped_knowledge_ids
+            revision.operation == "upsert"
+            and revision.from_knowledge_id in knowledge_ids
+            and revision.to_knowledge_id in knowledge_ids
         ):
-            errors.append(
-                {
-                    "entity": item.get("canonical_id"),
-                    "reason": "启用知识对象缺少教材映射",
-                }
-            )
+            relations.append(revision)
+    return kb, nodes, mappings, knowledge, relations
 
-    known_ids = {int(item.get("id")) for item in knowledge.values()}
-    for relation in relations:
-        source = int(relation.get("from_knowledge_id"))
-        target = int(relation.get("to_knowledge_id"))
-        if source == target or source not in known_ids or target not in known_ids:
-            errors.append({"entity": relation.get("id"), "reason": "知识关系引用无效"})
-    if _has_prerequisite_cycle(relations):
-        errors.append({"entity": "knowledge_relation", "reason": "前置关系存在有向环"})
+
+def validate_knowledge_base(session: Session, kb_id: int) -> list[dict[str, Any]]:
+    try:
+        kb, _nodes, mappings, _knowledge, relations = _candidate(session, kb_id)
+    except BusinessError as exc:
+        details = exc.details
+        return details if isinstance(details, list) else [{"reason": exc.message}]
+    errors = []
+    if not mappings:
+        errors.append({"entity": str(kb.id), "reason": "知识库至少关联一个知识点"})
+    if _cycle(relations):
+        errors.append({"entity": "knowledge_relation", "reason": "前置关系存在循环"})
     return errors
 
 
-def create_batch(
-    session: Session,
-    space_code: str,
-    version_label: str | None,
-    release_note: str | None,
-    change_log_ids: list[int],
-    actor: str,
-) -> ReleaseBatch:
-    space = session.scalar(
-        select(ContentSpace).where(ContentSpace.space_code == space_code)
-    )
-    if space is None:
-        raise BusinessError("NOT_FOUND", "编辑空间不存在", 404)
-    current = current_version(session)
-    changes = (
-        list(session.scalars(select(ChangeLog).where(ChangeLog.id.in_(change_log_ids))))
-        if change_log_ids
-        else list(
-            session.scalars(
-                select(ChangeLog).where(
-                    ChangeLog.space_id == space.id, ChangeLog.status == "unreleased"
-                )
+def _next_version(session: Session, kb_id: int) -> int:
+    return (
+        session.scalar(
+            select(func.max(ReleaseVersion.version_no)).where(
+                ReleaseVersion.knowledge_base_id == kb_id
             )
         )
+        or 0
+    ) + 1
+
+
+def _copy_snapshots(
+    session: Session, release: ReleaseVersion, nodes, mappings, knowledge, relations
+):
+    for node in nodes:
+        session.add(
+            ReleaseCatalogNode(
+                release_id=release.id,
+                catalog_node_id=node.id,
+                parent_id=node.parent_id,
+                level=node.level,
+                node_type=node.node_type,
+                source_key=node.source_key,
+                title=node.title,
+                source_path=node.source_path,
+                sort_order=node.sort_order,
+            )
+        )
+    by_id = {row.id: row for row in knowledge}
+    for mapping in mappings:
+        item = by_id[mapping.knowledge_id]
+        session.add(
+            ReleaseMapping(
+                release_id=release.id,
+                catalog_node_id=mapping.catalog_node_id,
+                knowledge_id=item.id,
+                canonical_id=item.canonical_id,
+            )
+        )
+    for item in knowledge:
+        session.add(
+            ReleaseKnowledge(
+                release_id=release.id,
+                knowledge_id=item.id,
+                canonical_id=item.canonical_id,
+                revision_id=_current_revision(session, item).id,
+            )
+        )
+    for revision in relations:
+        source = session.get(KnowledgeObject, revision.from_knowledge_id)
+        target = session.get(KnowledgeObject, revision.to_knowledge_id)
+        if source and target:
+            session.add(
+                ReleaseRelation(
+                    release_id=release.id,
+                    relation_id=revision.relation_id,
+                    relation_revision_id=revision.id,
+                    relation_type=revision.relation_type,
+                    from_canonical_id=source.canonical_id,
+                    to_canonical_id=target.canonical_id,
+                    note=revision.note,
+                )
+            )
+
+
+def release_response(release: ReleaseVersion) -> dict[str, Any]:
+    return {
+        "id": str(release.id),
+        "knowledgeBaseId": str(release.knowledge_base_id),
+        "releaseVersion": release.version_label,
+        "versionNo": release.version_no,
+        "releaseType": release.release_type,
+        "contentHash": release.content_hash,
+        "publishedBy": release.published_by,
+        "publishedAt": release.published_at.isoformat(),
+        "reason": release.reason,
+    }
+
+
+def publish_knowledge_base(
+    session: Session, kb_id: int, actor: str, request_id: str, reason: str | None = None
+) -> dict[str, Any]:
+    errors = validate_knowledge_base(session, kb_id)
+    if errors:
+        raise BusinessError("VALIDATION_FAILED", "发布校验未通过", 422, errors)
+    kb, nodes, mappings, knowledge, relations = _candidate(session, kb_id)
+    base = (
+        session.get(ReleaseVersion, kb.current_release_id)
+        if kb.current_release_id
+        else None
     )
-    if not changes:
-        raise BusinessError("VALIDATION_FAILED", "没有待发布变更", 422)
-    label = version_label or datetime.utcnow().strftime("%Y.%m.%d.%H%M%S")
+    version_no = _next_version(session, kb_id)
+    label = f"kb_{kb_id}.v{version_no}"
+    now = utc_now()
     batch = ReleaseBatch(
-        space_id=space.id,
-        base_release_id=current.id if current else None,
-        batch_type="normal",
-        version_label=label,
-        release_note=release_note,
+        knowledge_base_id=kb_id,
+        base_release_id=base.id if base else None,
+        release_type="normal",
+        release_note=reason,
+        validation_status="passed",
+        status="published",
         created_by=actor,
+        published_by=actor,
+        published_at=now,
     )
     session.add(batch)
     session.flush()
-    for change in changes:
-        if change.status != "unreleased" or change.after_hash is None:
-            raise BusinessError("CONFLICT", "只能选择未发布且内容完整的变更", 409)
-        session.add(
-            ReleaseBatchItem(
-                batch_id=batch.id,
-                change_log_id=change.id,
-                selected_hash=change.after_hash,
-            )
-        )
-    session.add(
-        AuditLog(
-            actor_id=actor,
-            action="release_batch.create",
-            entity_type="release_batch",
-            entity_key=str(batch.id),
-            summary=batch.version_label,
-            created_at=utc_now(),
-        )
-    )
-    session.commit()
-    return batch
-
-
-def validate_batch(session: Session, batch_id: int) -> list[dict[str, Any]]:
-    batch = session.get(ReleaseBatch, batch_id)
-    if batch is None:
-        raise BusinessError("NOT_FOUND", "发布批次不存在", 404)
-    errors = validate_document(candidate_document(session, batch))
-    batch.validation_status = "failed" if errors else "passed"
-    session.commit()
-    return errors
-
-
-def publish_batch(session: Session, batch_id: int, actor: str) -> ReleaseVersion:
-    batch = session.get(ReleaseBatch, batch_id)
-    if batch is None:
-        raise BusinessError("NOT_FOUND", "发布批次不存在", 404)
-    if batch.validation_status != "passed":
-        errors = validate_batch(session, batch_id)
-        if errors:
-            raise BusinessError("VALIDATION_FAILED", "发布校验未通过", 422, errors)
-        session.refresh(batch)
-    document = candidate_document(session, batch)
-    published_at = utc_now()
-    version = ReleaseVersion(
-        version_label=batch.version_label,
-        base_release_id=batch.base_release_id,
+    release = ReleaseVersion(
+        knowledge_base_id=kb_id,
+        version_no=version_no,
+        version_label=label,
+        base_release_id=base.id if base else None,
         batch_id=batch.id,
-        release_type=batch.batch_type,
-        content_hash=_content_hash(document),
+        release_type="normal",
+        content_hash="pending",
         published_by=actor,
-        published_at=published_at,
+        published_at=now,
+        reason=reason,
     )
-    session.add(version)
+    session.add(release)
     session.flush()
-    for entity_type, rows in document.items():
-        for entity_key, payload in rows.items():
-            session.add(
-                ReleaseSnapshot(
-                    release_id=version.id,
-                    entity_type=entity_type,
-                    entity_key=entity_key,
-                    payload=payload,
-                )
-            )
-    current = session.get(ReleaseCurrent, 1)
-    if current is None:
-        session.add(
-            ReleaseCurrent(id=1, release_id=version.id, updated_at=published_at)
-        )
-    else:
-        current.release_id = version.id
-        current.updated_at = published_at
-    for change in _selected_changes(session, batch):
-        change.status = "released"
-    batch.status = "published"
-    batch.published_by = actor
-    batch.published_at = published_at
-    session.add(
-        AuditLog(
-            actor_id=actor,
-            action="release.publish",
-            entity_type="release_version",
-            entity_key=version.version_label,
-            summary=batch.release_note,
-            created_at=published_at,
-        )
+    _copy_snapshots(session, release, nodes, mappings, knowledge, relations)
+    release.content_hash = _hash(
+        {
+            "nodes": [row.id for row in nodes],
+            "mappings": [(row.catalog_node_id, row.knowledge_id) for row in mappings],
+            "knowledge": [row.id for row in knowledge],
+            "relations": [row.relation_id for row in relations],
+        }
     )
-    session.commit()
-    return version
-
-
-def get_release_document(
-    session: Session, version_label: Optional[str] = None
-) -> tuple[ReleaseVersion, dict[str, dict[str, dict[str, Any]]]]:
-    if version_label:
-        version = session.scalar(
-            select(ReleaseVersion).where(ReleaseVersion.version_label == version_label)
-        )
+    current = session.get(ReleaseCurrent, kb_id)
+    if current:
+        current.release_id = release.id
+        current.updated_at = now
     else:
-        version = current_version(session)
-    if version is None:
-        raise BusinessError("NOT_FOUND", "当前没有正式版本", 404)
-    return version, snapshot_document(session, version.id)
+        session.add(
+            ReleaseCurrent(
+                knowledge_base_id=kb_id, release_id=release.id, updated_at=now
+            )
+        )
+    kb.current_release_id = release.id
+    kb.status = "published"
+    kb.row_version += 1
+    kb.updated_by = actor
+    _audit(session, actor, "release.publish", label, request_id, kb_id)
+    session.commit()
+    return release_response(release)
 
 
-def list_releases(
-    session: Session, page_num: int = 1, page_size: int = 10
-) -> tuple[int, list[ReleaseVersion]]:
-    total = session.scalar(select(func.count()).select_from(ReleaseVersion)) or 0
+def list_releases(session: Session, kb_id: int, page_num: int = 1, page_size: int = 10):
+    statement = select(ReleaseVersion).where(ReleaseVersion.knowledge_base_id == kb_id)
+    total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
     rows = list(
         session.scalars(
-            select(ReleaseVersion)
-            .order_by(ReleaseVersion.id.desc())
+            statement.order_by(ReleaseVersion.version_no.desc())
             .offset((page_num - 1) * page_size)
             .limit(page_size)
         )
     )
-    return total, rows
+    return total, [release_response(row) for row in rows]
 
 
-def list_release_changes(session: Session) -> list[dict[str, Any]]:
-    changes = session.scalars(
-        select(ChangeLog)
-        .where(ChangeLog.status == "unreleased")
-        .order_by(ChangeLog.created_at.desc(), ChangeLog.id.desc())
+def get_release(
+    session: Session, kb_id: int, version_label: str | None = None
+) -> ReleaseVersion:
+    if version_label:
+        release = session.scalar(
+            select(ReleaseVersion).where(
+                ReleaseVersion.knowledge_base_id == kb_id,
+                ReleaseVersion.version_label == version_label,
+            )
+        )
+    else:
+        current_id = _kb(session, kb_id).current_release_id
+        release = session.get(ReleaseVersion, current_id) if current_id else None
+    if release is None:
+        raise BusinessError("NOT_FOUND", "正式版本不存在", 404)
+    return release
+
+
+def offline_knowledge_base(session: Session, kb_id: int, actor: str, request_id: str):
+    kb = _kb(session, kb_id)
+    if kb.status != "published":
+        raise BusinessError("CONFLICT", "只有已发布知识库可以下线", 409)
+    kb.status = "offline"
+    kb.row_version += 1
+    kb.updated_by = actor
+    _audit(session, actor, "knowledge_base.offline", str(kb_id), request_id, kb_id)
+    session.commit()
+    from app.modules.catalog.service import _kb_response
+
+    return _kb_response(session, kb)
+
+
+def _copy_release_rows(
+    session: Session, source: ReleaseVersion, target: ReleaseVersion
+) -> None:
+    for row in session.scalars(
+        select(ReleaseCatalogNode).where(ReleaseCatalogNode.release_id == source.id)
+    ):
+        session.add(
+            ReleaseCatalogNode(
+                release_id=target.id,
+                catalog_node_id=row.catalog_node_id,
+                parent_id=row.parent_id,
+                level=row.level,
+                node_type=row.node_type,
+                source_key=row.source_key,
+                title=row.title,
+                source_path=row.source_path,
+                sort_order=row.sort_order,
+            )
+        )
+    for row in session.scalars(
+        select(ReleaseMapping).where(ReleaseMapping.release_id == source.id)
+    ):
+        session.add(
+            ReleaseMapping(
+                release_id=target.id,
+                catalog_node_id=row.catalog_node_id,
+                knowledge_id=row.knowledge_id,
+                canonical_id=row.canonical_id,
+            )
+        )
+    for row in session.scalars(
+        select(ReleaseKnowledge).where(ReleaseKnowledge.release_id == source.id)
+    ):
+        session.add(
+            ReleaseKnowledge(
+                release_id=target.id,
+                knowledge_id=row.knowledge_id,
+                canonical_id=row.canonical_id,
+                revision_id=row.revision_id,
+            )
+        )
+    for row in session.scalars(
+        select(ReleaseRelation).where(ReleaseRelation.release_id == source.id)
+    ):
+        session.add(
+            ReleaseRelation(
+                release_id=target.id,
+                relation_id=row.relation_id,
+                relation_revision_id=row.relation_revision_id,
+                relation_type=row.relation_type,
+                from_canonical_id=row.from_canonical_id,
+                to_canonical_id=row.to_canonical_id,
+                note=row.note,
+            )
+        )
+
+
+def rollback_knowledge_base(
+    session: Session,
+    kb_id: int,
+    source_version: str,
+    actor: str,
+    request_id: str,
+    reason: str,
+):
+    kb = _kb(session, kb_id)
+    source = get_release(session, kb_id, source_version)
+    version_no = _next_version(session, kb_id)
+    label = f"kb_{kb_id}.v{version_no}"
+    now = utc_now()
+    batch = ReleaseBatch(
+        knowledge_base_id=kb_id,
+        base_release_id=kb.current_release_id,
+        source_release_id=source.id,
+        release_type="rollback",
+        release_note=reason,
+        validation_status="passed",
+        status="published",
+        created_by=actor,
+        published_by=actor,
+        published_at=now,
     )
-    return [
-        {
-            "id": change.id,
-            "entityType": change.entity_type,
-            "entityKey": change.entity_key,
-            "operation": change.operation,
-            "summary": (
-                change.after_payload.get("name")
-                or change.after_payload.get("title")
-                or change.after_payload.get("canonical_id")
-                if isinstance(change.after_payload, dict)
-                else None
-            ),
-        }
-        for change in changes
-    ]
+    session.add(batch)
+    session.flush()
+    release = ReleaseVersion(
+        knowledge_base_id=kb_id,
+        version_no=version_no,
+        version_label=label,
+        base_release_id=kb.current_release_id,
+        batch_id=batch.id,
+        release_type="rollback",
+        content_hash=source.content_hash,
+        published_by=actor,
+        published_at=now,
+        reason=reason,
+    )
+    session.add(release)
+    session.flush()
+    _copy_release_rows(session, source, release)
+    current = session.get(ReleaseCurrent, kb_id)
+    if current:
+        current.release_id = release.id
+        current.updated_at = now
+    else:
+        session.add(
+            ReleaseCurrent(
+                knowledge_base_id=kb_id, release_id=release.id, updated_at=now
+            )
+        )
+    kb.current_release_id = release.id
+    kb.status = "published"
+    kb.row_version += 1
+    kb.updated_by = actor
+    _audit(session, actor, "release.rollback", label, request_id, kb_id)
+    session.commit()
+    return release_response(release)
 
 
-def list_audit_logs(
-    session: Session, page_num: int = 1, page_size: int = 10
-) -> tuple[int, list[dict[str, Any]]]:
+def list_audit_logs(session: Session, page_num: int = 1, page_size: int = 10):
     total = session.scalar(select(func.count()).select_from(AuditLog)) or 0
-    logs = session.scalars(
-        select(AuditLog)
-        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-        .offset((page_num - 1) * page_size)
-        .limit(page_size)
+    rows = list(
+        session.scalars(
+            select(AuditLog)
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .offset((page_num - 1) * page_size)
+            .limit(page_size)
+        )
     )
     return total, [
         {
-            "id": log.id,
+            "id": row.id,
             "actorType": "admin",
-            "actorId": log.actor_id,
-            "action": log.action,
-            "resourceType": log.entity_type or "",
-            "resourceId": log.entity_key or "",
-            "requestId": log.request_id,
-            "createdAt": log.created_at.isoformat(),
+            "actorId": row.actor_id,
+            "action": row.action,
+            "resourceType": row.entity_type,
+            "resourceId": row.entity_key,
+            "requestId": row.request_id,
+            "createdAt": row.created_at.isoformat(),
         }
-        for log in logs
+        for row in rows
     ]
