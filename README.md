@@ -17,6 +17,9 @@ make dev
 
 `make install` 安装依赖；生产/集成环境使用 MySQL 8，启动前配置
 `.env` 中的 `KIKO_KNOWLEDGE_DATABASE_URL`，再执行 `make db-init` 初始化或升级数据库。
+`make db-init` 会同时导入 `seed_data/` 中一年级、二年级原子知识点 Excel
+及其前置关系；重复执行已完成的种子导入会自动跳过。
+知识点 `canonicalId` 统一为以 1 开头的 8 位纯数字字符串；人工新建时由后端自动生成，Excel 导入时由文件提供。
 本地快速冒烟可以使用默认 SQLite，但不能代替 MySQL 事务和锁验收。
 `make dev` 启动 FastAPI，默认监听 `0.0.0.0:8001`，Swagger UI 地址为
 `http://127.0.0.1:8001/docs`。

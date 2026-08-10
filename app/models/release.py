@@ -93,7 +93,7 @@ class ReleaseMapping(Base):
     )
     catalog_node_id: Mapped[int] = mapped_column(Integer, nullable=False)
     knowledge_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    canonical_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_id: Mapped[str] = mapped_column(String(8), nullable=False)
     __table_args__ = (
         UniqueConstraint("release_id", "catalog_node_id", "knowledge_id"),
     )
@@ -107,7 +107,7 @@ class ReleaseKnowledge(Base):
         ForeignKey("release_version.id"), nullable=False
     )
     knowledge_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    canonical_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_id: Mapped[str] = mapped_column(String(8), nullable=False)
     revision_id: Mapped[int] = mapped_column(Integer, nullable=False)
     __table_args__ = (
         UniqueConstraint("release_id", "knowledge_id"),
@@ -125,7 +125,14 @@ class ReleaseRelation(Base):
     relation_id: Mapped[int] = mapped_column(Integer, nullable=False)
     relation_revision_id: Mapped[int] = mapped_column(Integer, nullable=False)
     relation_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    from_canonical_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    to_canonical_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    from_canonical_id: Mapped[str] = mapped_column(String(8), nullable=False)
+    to_canonical_id: Mapped[str] = mapped_column(String(8), nullable=False)
     note: Mapped[Optional[str]] = mapped_column(Text)
-    __table_args__ = (UniqueConstraint("release_id", "relation_id"),)
+    __table_args__ = (
+        UniqueConstraint("release_id", "relation_id"),
+        Index(
+            "ix_release_relation_relation_revision",
+            "relation_id",
+            "relation_revision_id",
+        ),
+    )

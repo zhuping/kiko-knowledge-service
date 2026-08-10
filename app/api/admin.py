@@ -90,6 +90,7 @@ def current_user(request: Request, identity: AdminIdentity = Depends(admin_ident
 @router.get("/knowledge-bases")
 def knowledge_bases(
     request: Request,
+    name: str | None = None,
     grade_term_code: str | None = Query(None, alias="gradeTermCode"),
     subject_code: str | None = Query(None, alias="subjectCode"),
     textbook_edition_code: str | None = Query(None, alias="textbookEditionCode"),
@@ -107,6 +108,7 @@ def knowledge_bases(
         status,
         page_num,
         page_size,
+        name,
     )
     return success(_page(total, page_num, page_size, rows), _request_id(request))
 

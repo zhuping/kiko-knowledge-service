@@ -127,18 +127,32 @@ def open_headers(client, path: str, query: str = "", secret: bytes = b"secret"):
 
 def test_publish_snapshot_and_point_revision(client):
     kb, node_id = seed_catalog(client)
-    create_point(client, "m.num.count.1_100", "100以内数数")
-    create_point(client, "m.num.write.1_100", "100以内写数")
-    map_point(client, kb, node_id, "m.num.count.1_100")
+    create_point(client, "10000001", "100以内数数")
+    create_point(client, "10000002", "100以内写数")
+    map_point(client, kb, node_id, "10000001")
     kb = call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")
-    map_point(client, kb, node_id, "m.num.write.1_100")
+    map_point(client, kb, node_id, "10000002")
+    knowledge_page = call(
+        client,
+        "GET",
+        "/api/v1/admin/knowledge",
+        params={"canonicalId": "10000001"},
+    )
+    assert knowledge_page["list"][0]["knowledgeBaseMappings"] == [
+        {
+            "knowledgeBaseId": kb["id"],
+            "knowledgeBaseName": "人教版2024数学一年级上册",
+            "textbookEditionCode": "pep_math_2024_g1_t1",
+            "textbookEditionName": "人教版2024数学一年级上册",
+        }
+    ]
     call(
         client,
         "POST",
         "/api/v1/admin/relations",
         {
-            "canonicalId": "m.num.write.1_100",
-            "prerequisiteCanonicalIds": ["m.num.count.1_100"],
+            "canonicalId": "10000002",
+            "prerequisiteCanonicalIds": ["10000001"],
         },
     )
     assert call(
@@ -151,11 +165,13 @@ def test_publish_snapshot_and_point_revision(client):
         f"/api/v1/admin/knowledge-bases/{kb['id']}/releases/{release['releaseVersion']}"
     )
     assert detail.status_code == 200, detail.text
-    point = call(client, "GET", "/api/v1/admin/knowledge/m.num.count.1_100")
+    point = call(client, "GET", "/api/v1/admin/knowledge/10000001")
     assert point["status"] == "published"
     relations = call(client, "GET", "/api/v1/admin/relations")
     assert relations["list"][1]["status"] == "published"
-    assert relations["list"][1]["prerequisites"] == ["m.num.count.1_100"]
+    assert relations["list"][1]["prerequisites"] == [
+        {"canonicalId": "10000001", "knowledgeName": "100以内数数"}
+    ]
 
     path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
     response = client.get(path, headers=open_headers(client, path))
@@ -164,15 +180,32 @@ def test_publish_snapshot_and_point_revision(client):
     assert len(response.json()["data"]["knowledge"]) == 2
 
 
+def test_create_knowledge_generates_numeric_id(client):
+    point = call(
+        client,
+        "POST",
+        "/api/v1/admin/knowledge",
+        {
+            "knowledgeName": "自动生成 ID 的知识点",
+            "knowledgeType": "concept",
+            "gradeTermCode": "g1_t1",
+            "scope": "core",
+        },
+    )
+    assert point["canonicalId"].isdigit()
+    assert len(point["canonicalId"]) == 8
+    assert point["canonicalId"].startswith("1")
+
+
 def test_edit_creates_pending_revision_until_next_release(client):
     kb, node_id = seed_catalog(client)
-    create_point(client, "m.num.count.1_100", "100以内数数")
-    map_point(client, kb, node_id, "m.num.count.1_100")
+    create_point(client, "10000001", "100以内数数")
+    map_point(client, kb, node_id, "10000001")
     first = publish(client, kb["id"])
     edited = call(
         client,
         "PATCH",
-        "/api/v1/admin/knowledge/m.num.count.1_100",
+        "/api/v1/admin/knowledge/10000001",
         {"knowledgeName": "100以内顺数", "rowVersion": 1},
     )
     assert edited["status"] == "pending"
@@ -182,7 +215,7 @@ def test_edit_creates_pending_revision_until_next_release(client):
     assert old["knowledge"][0]["knowledgeName"] == "100以内数数"
     second = publish(client, kb["id"])
     assert second["versionNo"] == first["versionNo"] + 1
-    current = call(client, "GET", "/api/v1/admin/knowledge/m.num.count.1_100")
+    current = call(client, "GET", "/api/v1/admin/knowledge/10000001")
     assert current["status"] == "published"
     assert (
         current["currentFormalVersions"][-1]["releaseVersion"]
@@ -205,18 +238,18 @@ def test_edit_creates_pending_revision_until_next_release(client):
 
 def test_relation_draft_can_be_reverted(client):
     kb, node_id = seed_catalog(client)
-    create_point(client, "m.num.count.1_100", "100以内数数")
-    create_point(client, "m.num.write.1_100", "100以内写数")
-    map_point(client, kb, node_id, "m.num.count.1_100")
+    create_point(client, "10000001", "100以内数数")
+    create_point(client, "10000002", "100以内写数")
+    map_point(client, kb, node_id, "10000001")
     kb = call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")
-    map_point(client, kb, node_id, "m.num.write.1_100")
+    map_point(client, kb, node_id, "10000002")
     relation = call(
         client,
         "POST",
         "/api/v1/admin/relations",
         {
-            "canonicalId": "m.num.write.1_100",
-            "prerequisiteCanonicalIds": ["m.num.count.1_100"],
+            "canonicalId": "10000002",
+            "prerequisiteCanonicalIds": ["10000001"],
         },
     )[0]
     publish(client, kb["id"])
@@ -242,7 +275,7 @@ def test_relation_draft_can_be_reverted(client):
         client,
         "GET",
         "/api/v1/admin/relations",
-        params={"canonicalId": "m.num.write.1_100"},
+        params={"canonicalId": "10000002"},
     )
     assert target["list"][0]["status"] == "pending"
     call(
@@ -254,8 +287,8 @@ def test_relation_draft_can_be_reverted(client):
 
 def test_offline_blocks_default_open_read_but_keeps_history(client):
     kb, node_id = seed_catalog(client)
-    create_point(client, "m.num.count.1_100", "100以内数数")
-    map_point(client, kb, node_id, "m.num.count.1_100")
+    create_point(client, "10000001", "100以内数数")
+    map_point(client, kb, node_id, "10000001")
     release = publish(client, kb["id"])
     call(client, "POST", f"/api/v1/admin/knowledge-bases/{kb['id']}/offline")
     path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
@@ -291,7 +324,7 @@ def test_import_uses_current_excel_fields_and_creates_prerequisite(client):
     )
     sheet.append(
         [
-            "m.num.count.1_100",
+            "10000001",
             "skill",
             "100以内数数",
             "一年级上册",
@@ -304,7 +337,7 @@ def test_import_uses_current_excel_fields_and_creates_prerequisite(client):
     )
     sheet.append(
         [
-            "m.num.write.1_100",
+            "10000002",
             "skill",
             "100以内写数",
             "一年级上册",
@@ -312,7 +345,7 @@ def test_import_uses_current_excel_fields_and_creates_prerequisite(client):
             "一上/数的认识",
             '["写数"]',
             "写数题",
-            '["m.num.count.1_100"]',
+            '["10000001"]',
         ]
     )
     content = BytesIO()
@@ -325,13 +358,13 @@ def test_import_uses_current_excel_fields_and_creates_prerequisite(client):
     job = response.json()["data"]
     committed = client.post(f"/api/v1/admin/imports/{job['jobId']}/commit")
     assert committed.status_code == 200, committed.text
-    point = call(client, "GET", "/api/v1/admin/knowledge/m.num.write.1_100")
+    point = call(client, "GET", "/api/v1/admin/knowledge/10000002")
     assert point["ocrSignals"] == ["写数"]
     relations = call(client, "GET", "/api/v1/admin/relations")
-    target = next(
-        row for row in relations["list"] if row["canonicalId"] == "m.num.write.1_100"
-    )
-    assert target["prerequisites"] == ["m.num.count.1_100"]
+    target = next(row for row in relations["list"] if row["canonicalId"] == "10000002")
+    assert target["prerequisites"] == [
+        {"canonicalId": "10000001", "knowledgeName": "100以内数数"}
+    ]
 
 
 def test_v1_admin_identity_is_admin_only(client):

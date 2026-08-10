@@ -27,8 +27,6 @@ from app.schemas.catalog import (
     MappingCreate,
 )
 
-CANONICAL_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
-
 
 def _hash(value: dict[str, Any]) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -128,6 +126,14 @@ def seed_textbook_editions(session: Session) -> None:
 
 def _kb_response(session: Session, kb: KnowledgeBase) -> dict[str, Any]:
     edition = session.get(TextbookEdition, kb.textbook_edition_id)
+    mapping_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeBaseMapping)
+            .where(KnowledgeBaseMapping.knowledge_base_id == kb.id)
+        )
+        or 0
+    )
     release = (
         session.get(ReleaseVersion, kb.current_release_id)
         if kb.current_release_id
@@ -144,6 +150,8 @@ def _kb_response(session: Session, kb: KnowledgeBase) -> dict[str, Any]:
         "textbookEditionName": edition.edition_name if edition else None,
         "status": kb.status,
         "currentReleaseVersion": release.version_label if release else None,
+        "knowledgeCount": mapping_count,
+        "updatedAt": kb.updated_at.isoformat(),
         "rowVersion": kb.row_version,
     }
 
@@ -197,8 +205,11 @@ def list_knowledge_bases(
     status: str | None = None,
     page_num: int = 1,
     page_size: int = 10,
+    name: str | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     statement = select(KnowledgeBase)
+    if name:
+        statement = statement.where(KnowledgeBase.name.ilike(f"%{name}%"))
     if grade_term:
         statement = statement.where(KnowledgeBase.grade_term == grade_term)
     if subject:

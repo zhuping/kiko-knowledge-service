@@ -34,7 +34,7 @@ IMPORT_HEADERS = (
 GRADE_TERM_BY_LABEL = {value: key for key, value in GRADE_TERM_LABELS.items()}
 KNOWLEDGE_TYPES = set(KnowledgeType.__args__)
 SCOPES = set(KnowledgeScope.__args__)
-CANONICAL_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+CANONICAL_ID = re.compile(r"^1\d{7}$")
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_ROWS = 1000
 
@@ -103,7 +103,12 @@ def _validate(content: bytes):
         canonical_id = value["canonical_id"]
         if canonical_id and not CANONICAL_ID.fullmatch(canonical_id):
             errors.append(
-                _error(row_number, "canonical_id", "格式无效", "使用语义段 ID")
+                _error(
+                    row_number,
+                    "canonical_id",
+                    "格式无效",
+                    "使用以 1 开头的 8 位纯数字 ID",
+                )
             )
         if canonical_id in seen:
             errors.append(
@@ -146,7 +151,7 @@ def _validate(content: bytes):
 
 
 def _job_response(job: Job) -> dict[str, Any]:
-    payload = job.payload_json or {}
+    payload = dict(job.payload_json or {})
     errors = payload.get("errors", [])
     return {
         "jobId": str(job.id),
@@ -223,7 +228,7 @@ def commit_import_job(
     session: Session, job_id: int, actor: str, request_id: str
 ) -> Job:
     job = get_job(session, job_id)
-    payload = job.payload_json or {}
+    payload = dict(job.payload_json or {})
     if payload.get("committed"):
         return job
     if job.status != "success":

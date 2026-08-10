@@ -66,7 +66,7 @@ class KnowledgeObject(TimestampMixin, Base):
     __tablename__ = "knowledge_object"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    canonical_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    canonical_id: Mapped[str] = mapped_column(String(8), unique=True, nullable=False)
     latest_revision_id: Mapped[Optional[int]] = mapped_column(Integer)
     row_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_by: Mapped[str] = mapped_column(String(128), nullable=False)

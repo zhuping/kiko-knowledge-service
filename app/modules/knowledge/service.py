@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
+import secrets
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -24,7 +24,10 @@ from app.models import (
 from app.models.base import utc_now
 from app.schemas.catalog import KnowledgeCreate, KnowledgeSearch, KnowledgeUpdate
 
-CANONICAL_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+CANONICAL_ID_WIDTH = 8
+CANONICAL_ID = re.compile(r"^1\d{7}$")
+CANONICAL_ID_MIN = 10_000_000
+CANONICAL_ID_SPACE = 10_000_000
 
 
 def _hash(value: dict[str, Any]) -> str:
@@ -100,6 +103,48 @@ def _formal_versions(session: Session, knowledge_id: int) -> list[dict[str, str]
     return result
 
 
+def _knowledge_base_mappings(
+    session: Session, knowledge_ids: set[int]
+) -> dict[int, list[dict[str, str]]]:
+    if not knowledge_ids:
+        return {}
+    rows = session.execute(
+        select(
+            KnowledgeBaseMapping.knowledge_id,
+            KnowledgeBase.id,
+            KnowledgeBase.name,
+            TextbookEdition.edition_code,
+            TextbookEdition.edition_name,
+        )
+        .join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseMapping.knowledge_base_id)
+        .join(TextbookEdition, TextbookEdition.id == KnowledgeBase.textbook_edition_id)
+        .where(KnowledgeBaseMapping.knowledge_id.in_(knowledge_ids))
+        .order_by(KnowledgeBaseMapping.knowledge_id, KnowledgeBase.id)
+    ).all()
+    result: dict[int, list[dict[str, str]]] = {}
+    seen: set[tuple[int, int]] = set()
+    for (
+        knowledge_id,
+        knowledge_base_id,
+        knowledge_base_name,
+        edition_code,
+        edition_name,
+    ) in rows:
+        key = (knowledge_id, knowledge_base_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.setdefault(knowledge_id, []).append(
+            {
+                "knowledgeBaseId": str(knowledge_base_id),
+                "knowledgeBaseName": knowledge_base_name,
+                "textbookEditionCode": edition_code,
+                "textbookEditionName": edition_name,
+            }
+        )
+    return result
+
+
 def knowledge_status(session: Session, knowledge: KnowledgeObject) -> str:
     published = session.scalar(
         select(ReleaseKnowledge.id).where(
@@ -110,12 +155,22 @@ def knowledge_status(session: Session, knowledge: KnowledgeObject) -> str:
     return "published" if published else "pending"
 
 
-def knowledge_response(session: Session, knowledge: KnowledgeObject) -> dict[str, Any]:
+def knowledge_response(
+    session: Session,
+    knowledge: KnowledgeObject,
+    mapping_context: dict[int, list[dict[str, str]]] | None = None,
+) -> dict[str, Any]:
     current = _latest_revision(session, knowledge)
     formal = _formal_revision(session, knowledge.id)
+    knowledge_base_mappings = (
+        mapping_context.get(knowledge.id, [])
+        if mapping_context is not None
+        else _knowledge_base_mappings(session, {knowledge.id}).get(knowledge.id, [])
+    )
     return {
         "canonicalId": knowledge.canonical_id,
         **(_revision_payload(current) or {}),
+        "knowledgeBaseMappings": knowledge_base_mappings,
         "currentFormalVersions": _formal_versions(session, knowledge.id),
         "status": knowledge_status(session, knowledge),
         "rowVersion": knowledge.row_version,
@@ -207,7 +262,8 @@ def list_knowledge(
                 )
             )
         )
-    return total, [knowledge_response(session, row) for row in rows]
+    mapping_context = _knowledge_base_mappings(session, {row.id for row in rows})
+    return total, [knowledge_response(session, row, mapping_context) for row in rows]
 
 
 def _next_revision(session: Session, knowledge_id: int) -> int:
@@ -219,6 +275,17 @@ def _next_revision(session: Session, knowledge_id: int) -> int:
         )
         or 0
     ) + 1
+
+
+def _new_canonical_id(session: Session) -> str:
+    for _ in range(32):
+        value = CANONICAL_ID_MIN + secrets.randbelow(CANONICAL_ID_SPACE)
+        candidate = f"{value:0{CANONICAL_ID_WIDTH}d}"
+        if not session.scalar(
+            select(KnowledgeObject.id).where(KnowledgeObject.canonical_id == candidate)
+        ):
+            return candidate
+    raise BusinessError("ID_EXHAUSTED", "暂时无法生成唯一知识点 ID", 409)
 
 
 def _create_revision(
@@ -248,7 +315,7 @@ def _create_revision(
 def create_knowledge(
     session: Session, data: KnowledgeCreate, actor: str, request_id: str
 ) -> dict[str, Any]:
-    canonical_id = data.canonical_id or f"m.math.knowledge.{uuid.uuid4().hex[:12]}"
+    canonical_id = data.canonical_id or _new_canonical_id(session)
     if not CANONICAL_ID.fullmatch(canonical_id):
         raise BusinessError("PARAM_INVALID", "canonicalId 格式无效", 400)
     if session.scalar(

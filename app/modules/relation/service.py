@@ -158,6 +158,7 @@ def _relation_payload(session: Session, relation: KnowledgeRelation) -> dict[str
         "relationType": row.relation_type,
         "fromCanonicalId": source.canonical_id if source else None,
         "toCanonicalId": target.canonical_id if target else None,
+        "operation": row.operation,
         "note": row.note,
         "currentFormalVersions": _formal_versions(session, relation.id),
         "status": _status(session, relation),

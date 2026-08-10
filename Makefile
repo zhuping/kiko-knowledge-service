@@ -1,6 +1,6 @@
 .PHONY: install db-init dev test lint format-check
 
-PYTHON ?= python3
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PORT ?= 8001
 
 install:
@@ -8,6 +8,7 @@ install:
 
 db-init:
 	$(PYTHON) -m alembic upgrade head
+	$(PYTHON) -m app.seed
 
 dev:
 	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port $(PORT) --reload
