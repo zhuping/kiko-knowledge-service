@@ -103,7 +103,10 @@ def _candidate(session: Session, kb_id: int):
     nodes = list(
         session.scalars(
             select(CatalogNode)
-            .where(CatalogNode.edition_id == kb.textbook_edition_id)
+            .where(
+                CatalogNode.edition_id == kb.textbook_edition_id,
+                CatalogNode.node_type.in_(("book", "unit")),
+            )
             .order_by(CatalogNode.sort_order, CatalogNode.id)
         )
     )

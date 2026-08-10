@@ -186,7 +186,11 @@ def upgrade() -> None:
             0,
             "book",
             None,
-            edition_code,
+            bind.execute(
+                select(TextbookEdition.edition_name).where(
+                    TextbookEdition.id == edition_id
+                )
+            ).scalar_one(),
             0,
         )
         node_ids = {"": root_id}

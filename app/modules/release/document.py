@@ -6,16 +6,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    KnowledgeBase,
     KnowledgeRevision,
     ReleaseCatalogNode,
     ReleaseKnowledge,
     ReleaseMapping,
     ReleaseRelation,
     ReleaseVersion,
+    TextbookEdition,
 )
 
 
-def _tree_from_release(session: Session, release_id: int) -> list[dict]:
+def _tree_from_release(
+    session: Session, release_id: int, root_title: str | None
+) -> list[dict]:
     rows = list(
         session.scalars(
             select(ReleaseCatalogNode)
@@ -32,7 +36,11 @@ def _tree_from_release(session: Session, release_id: int) -> list[dict]:
             "id": str(row.catalog_node_id),
             "key": row.source_key,
             "sourceKey": row.source_key,
-            "title": row.title,
+            "title": (
+                root_title
+                if root_title and row.node_type == "book" and row.level == 0
+                else row.title
+            ),
             "level": row.level,
             "nodeType": row.node_type,
             "sourcePath": row.source_path,
@@ -46,6 +54,11 @@ def _tree_from_release(session: Session, release_id: int) -> list[dict]:
 
 
 def release_document(session: Session, release: ReleaseVersion) -> dict:
+    root_title = session.scalar(
+        select(TextbookEdition.edition_name)
+        .join(KnowledgeBase, KnowledgeBase.textbook_edition_id == TextbookEdition.id)
+        .where(KnowledgeBase.id == release.knowledge_base_id)
+    )
     knowledge = []
     for row in session.scalars(
         select(ReleaseKnowledge).where(ReleaseKnowledge.release_id == release.id)
@@ -86,7 +99,7 @@ def release_document(session: Session, release: ReleaseVersion) -> dict:
     return {
         "knowledgeBaseId": str(release.knowledge_base_id),
         "releaseVersion": release.version_label,
-        "catalog": _tree_from_release(session, release.id),
+        "catalog": _tree_from_release(session, release.id, root_title),
         "knowledge": knowledge,
         "mappings": mappings,
         "relations": relations,

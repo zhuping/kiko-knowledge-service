@@ -315,7 +315,10 @@ def catalog_tree(session: Session, edition_code: str) -> list[dict[str, Any]]:
     rows = list(
         session.scalars(
             select(CatalogNode)
-            .where(CatalogNode.edition_id == edition.id)
+            .where(
+                CatalogNode.edition_id == edition.id,
+                CatalogNode.node_type.in_(("book", "unit")),
+            )
             .order_by(CatalogNode.sort_order, CatalogNode.id)
         )
     )
@@ -328,7 +331,11 @@ def catalog_tree(session: Session, edition_code: str) -> list[dict[str, Any]]:
             "id": str(row.id),
             "key": row.source_key,
             "sourceKey": row.source_key,
-            "title": row.title,
+            "title": (
+                edition.edition_name
+                if row.node_type == "book" and row.parent_id is None
+                else row.title
+            ),
             "level": row.level,
             "nodeType": row.node_type,
             "sourcePath": row.source_path,
@@ -399,6 +406,8 @@ def create_mapping(
     knowledge = get_knowledge(session, data.canonical_id)
     if node is None or node.edition_id != kb.textbook_edition_id:
         raise BusinessError("VALIDATION_FAILED", "目录节点不属于当前教材", 422)
+    if node.node_type != "unit":
+        raise BusinessError("VALIDATION_FAILED", "当前版本只支持关联教材单元", 422)
     if session.scalar(
         select(KnowledgeBaseMapping.id).where(
             KnowledgeBaseMapping.knowledge_base_id == kb_id,
