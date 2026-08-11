@@ -98,7 +98,9 @@ class KnowledgeSearch(CamelModel):
     keyword: str | None = None
     canonical_id: str | None = None
     grade_term_code: GradeTerm | None = None
+    subject_code: str | None = None
     textbook_edition_code: str | None = None
+    candidate_for_knowledge_base_id: int | None = None
     knowledge_type: KnowledgeType | None = None
     scope: KnowledgeScope | None = None
     knowledge_base_id: int | None = None

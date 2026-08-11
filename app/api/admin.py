@@ -246,7 +246,11 @@ def knowledge_list(
     keyword: str | None = None,
     canonical_id: str | None = Query(None, alias="canonicalId"),
     grade_term_code: str | None = Query(None, alias="gradeTermCode"),
+    subject_code: str | None = Query(None, alias="subjectCode"),
     textbook_edition_code: str | None = Query(None, alias="textbookEditionCode"),
+    candidate_for_knowledge_base_id: int | None = Query(
+        None, alias="candidateForKnowledgeBaseId"
+    ),
     knowledge_type: str | None = Query(None, alias="knowledgeType"),
     scope: str | None = None,
     knowledge_base_id: int | None = Query(None, alias="knowledgeBaseId"),
@@ -260,7 +264,9 @@ def knowledge_list(
         keyword=keyword,
         canonical_id=canonical_id,
         grade_term_code=grade_term_code,
+        subject_code=subject_code,
         textbook_edition_code=textbook_edition_code,
+        candidate_for_knowledge_base_id=candidate_for_knowledge_base_id,
         knowledge_type=knowledge_type,
         scope=scope,
         knowledge_base_id=knowledge_base_id,

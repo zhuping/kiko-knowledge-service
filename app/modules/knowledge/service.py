@@ -206,6 +206,22 @@ def _knowledge_statement(data: KnowledgeSearch):
         statement = statement.where(KnowledgeRevision.type == data.knowledge_type)
     if data.scope:
         statement = statement.where(KnowledgeRevision.scope == data.scope)
+    if data.subject_code:
+        statement = statement.where(
+            select(KnowledgeBaseMapping.id)
+            .join(
+                KnowledgeBase,
+                KnowledgeBase.id == KnowledgeBaseMapping.knowledge_base_id,
+            )
+            .join(
+                TextbookEdition, TextbookEdition.id == KnowledgeBase.textbook_edition_id
+            )
+            .where(
+                TextbookEdition.subject == data.subject_code,
+                KnowledgeBaseMapping.knowledge_id == KnowledgeObject.id,
+            )
+            .exists()
+        )
     if data.textbook_edition_code:
         statement = statement.where(
             select(KnowledgeBaseMapping.id)
@@ -237,6 +253,32 @@ def _knowledge_statement(data: KnowledgeSearch):
 def list_knowledge(
     session: Session, data: KnowledgeSearch
 ) -> tuple[int, list[dict[str, Any]]]:
+    if data.candidate_for_knowledge_base_id:
+        knowledge_base = session.get(
+            KnowledgeBase, data.candidate_for_knowledge_base_id
+        )
+        if knowledge_base is None:
+            raise BusinessError("NOT_FOUND", "知识库不存在", 404)
+        edition = session.get(TextbookEdition, knowledge_base.textbook_edition_id)
+        if edition is None:
+            raise BusinessError("INTERNAL_ERROR", "知识库教材版本不存在", 500)
+        if data.subject_code and data.subject_code != knowledge_base.subject:
+            raise BusinessError("VALIDATION_FAILED", "学科与知识库不一致", 422)
+        if (
+            data.textbook_edition_code
+            and data.textbook_edition_code != edition.edition_code
+        ):
+            raise BusinessError("VALIDATION_FAILED", "教材版本与知识库不一致", 422)
+        if data.grade_term_code and data.grade_term_code != knowledge_base.grade_term:
+            raise BusinessError("VALIDATION_FAILED", "年级/学期与知识库不一致", 422)
+        data = data.model_copy(
+            update={
+                "grade_term_code": knowledge_base.grade_term,
+                "subject_code": None,
+                "textbook_edition_code": None,
+                "knowledge_base_id": None,
+            }
+        )
     statement = _knowledge_statement(data).order_by(KnowledgeObject.id)
     if data.status:
         # ponytail: V1 datasets are small; normalize status in application code
