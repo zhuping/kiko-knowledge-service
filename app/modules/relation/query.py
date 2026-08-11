@@ -30,20 +30,6 @@ def _pending_knowledge_ids(session: Session) -> set[int]:
         .exists()
     )
     all_knowledge_ids = set(session.scalars(select(KnowledgeObject.id)))
-    rows = session.execute(
-        select(
-            RelationRevision.from_knowledge_id,
-            RelationRevision.to_knowledge_id,
-        )
-        .join(
-            KnowledgeRelation,
-            RelationRevision.id == KnowledgeRelation.latest_revision_id,
-        )
-        .where(~formal)
-    ).all()
-    pending_ids = {
-        knowledge_id for row in rows for knowledge_id in row if knowledge_id is not None
-    }
     formal_rows = session.execute(
         select(
             RelationRevision.from_knowledge_id,
@@ -61,7 +47,7 @@ def _pending_knowledge_ids(session: Session) -> set[int]:
         for knowledge_id in row
         if knowledge_id is not None
     }
-    return all_knowledge_ids - (formal_ids - pending_ids)
+    return all_knowledge_ids - formal_ids
 
 
 def _statement(session: Session, data: RelationSearch):
@@ -250,8 +236,25 @@ def _group(
 
 
 def list_relations(session: Session, data: RelationSearch) -> tuple[int, list[dict]]:
+    relation_exists = (
+        select(RelationRevision.id)
+        .join(
+            KnowledgeRelation,
+            RelationRevision.id == KnowledgeRelation.latest_revision_id,
+        )
+        .where(
+            or_(
+                RelationRevision.from_knowledge_id == KnowledgeObject.id,
+                RelationRevision.to_knowledge_id == KnowledgeObject.id,
+            )
+        )
+        .exists()
+    )
     total, knowledge_rows = _page(
-        session, _statement(session, data), data.page_num, data.page_size
+        session,
+        _statement(session, data).where(relation_exists),
+        data.page_num,
+        data.page_size,
     )
     if not knowledge_rows:
         return total, []
@@ -317,9 +320,7 @@ def list_relations(session: Session, data: RelationSearch) -> tuple[int, list[di
                 if key not in seen_versions:
                     seen_versions.add(key)
                     current_versions.append(version)
-        pending = not current_versions or any(
-            detail["status"] == "pending" for detail in details
-        )
+        pending = not any(detail["status"] == "published" for detail in details)
         result.append(
             {
                 "canonicalId": knowledge.canonical_id,

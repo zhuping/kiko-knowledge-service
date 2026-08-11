@@ -462,11 +462,9 @@ def relation_group_response(
         for row in relation_rows
         for version in _formal_versions(session, row.relation_id)
     ]
-    pending = any(
-        knowledge.id in {row.from_knowledge_id, row.to_knowledge_id}
-        and _status(session, session.get(KnowledgeRelation, row.relation_id))
-        == "pending"
-        for row in _latest_revisions(session)
+    pending = not any(
+        _status(session, session.get(KnowledgeRelation, row.relation_id)) == "published"
+        for row in relation_rows
     )
     return {
         "canonicalId": knowledge.canonical_id,

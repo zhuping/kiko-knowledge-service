@@ -56,17 +56,13 @@ def test_relation_list_pages_and_batches_detail_queries(client):
     finally:
         event.remove(client.app.state.engine, "before_cursor_execute", count_query)
 
-    assert total == 25
-    assert len(rows) == 10
+    assert total == 2
+    assert len(rows) == 2
     assert query_count <= 6
     assert rows[0]["successors"] == [
         {"canonicalId": "10000002", "knowledgeName": "测试知识点 1"}
     ]
     assert rows[0]["status"] == "pending"
-    assert rows[2]["relations"] == []
-    assert rows[2]["currentFormalVersions"] == []
-    assert rows[2]["status"] == "pending"
-
     with client.app.state.session_factory() as session:
         pending_total, pending_rows = list_relations(
             session,
@@ -77,8 +73,8 @@ def test_relation_list_pages_and_batches_detail_queries(client):
             RelationSearch(status="published", page_num=1, page_size=20),
         )
 
-    assert pending_total == 25
-    assert len(pending_rows) == 20
+    assert pending_total == 2
+    assert len(pending_rows) == 2
     assert published_total == 0
     assert published_rows == []
 
