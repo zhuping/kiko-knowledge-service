@@ -15,6 +15,11 @@ from app.models import (
     KnowledgeBase,
     KnowledgeBaseMapping,
     KnowledgeObject,
+    KnowledgeRelation,
+    RelationRevision,
+    ReleaseKnowledge,
+    ReleaseMapping,
+    ReleaseRelation,
     ReleaseVersion,
     TextbookEdition,
 )
@@ -124,6 +129,118 @@ def seed_textbook_editions(session: Session) -> None:
     session.commit()
 
 
+def _has_pending_content(session: Session, kb: KnowledgeBase) -> bool:
+    if not kb.current_release_id:
+        return False
+    release_mappings = set(
+        session.execute(
+            select(ReleaseMapping.catalog_node_id, ReleaseMapping.knowledge_id).where(
+                ReleaseMapping.release_id == kb.current_release_id
+            )
+        ).all()
+    )
+    draft_mappings = set(
+        session.execute(
+            select(
+                KnowledgeBaseMapping.catalog_node_id,
+                KnowledgeBaseMapping.knowledge_id,
+            ).where(KnowledgeBaseMapping.knowledge_base_id == kb.id)
+        ).all()
+    )
+    if draft_mappings != release_mappings:
+        return True
+
+    knowledge_ids = {knowledge_id for _, knowledge_id in draft_mappings}
+    formal_revisions = dict(
+        session.execute(
+            select(ReleaseKnowledge.knowledge_id, ReleaseKnowledge.revision_id).where(
+                ReleaseKnowledge.release_id == kb.current_release_id
+            )
+        ).all()
+    )
+    current_revisions = {
+        knowledge.id: knowledge.latest_revision_id
+        for knowledge in session.scalars(
+            select(KnowledgeObject).where(KnowledgeObject.id.in_(knowledge_ids))
+        )
+    }
+    if current_revisions != {
+        knowledge_id: formal_revisions.get(knowledge_id)
+        for knowledge_id in knowledge_ids
+    }:
+        return True
+
+    current_relations = set(
+        session.execute(
+            select(KnowledgeRelation.id, KnowledgeRelation.latest_revision_id)
+            .join(
+                RelationRevision,
+                RelationRevision.id == KnowledgeRelation.latest_revision_id,
+            )
+            .where(
+                RelationRevision.operation == "upsert",
+                RelationRevision.from_knowledge_id.in_(knowledge_ids),
+                RelationRevision.to_knowledge_id.in_(knowledge_ids),
+            )
+        ).all()
+    )
+    formal_relations = set(
+        session.execute(
+            select(
+                ReleaseRelation.relation_id, ReleaseRelation.relation_revision_id
+            ).where(ReleaseRelation.release_id == kb.current_release_id)
+        ).all()
+    )
+    return current_relations != formal_relations
+
+
+def _latest_change_time(session: Session, kb: KnowledgeBase):
+    latest = kb.updated_at
+    if not kb.current_release_id:
+        return latest
+
+    knowledge_ids = set(
+        session.scalars(
+            select(KnowledgeBaseMapping.knowledge_id).where(
+                KnowledgeBaseMapping.knowledge_base_id == kb.id
+            )
+        )
+    )
+    if not knowledge_ids:
+        return latest
+
+    knowledge_updated_at = session.scalar(
+        select(func.max(KnowledgeObject.updated_at)).where(
+            KnowledgeObject.id.in_(knowledge_ids)
+        )
+    )
+    if knowledge_updated_at and knowledge_updated_at > latest:
+        latest = knowledge_updated_at
+
+    relation_updated_at = session.scalar(
+        select(func.max(KnowledgeRelation.updated_at))
+        .join(
+            RelationRevision,
+            RelationRevision.id == KnowledgeRelation.latest_revision_id,
+        )
+        .where(
+            RelationRevision.from_knowledge_id.in_(knowledge_ids),
+            RelationRevision.to_knowledge_id.in_(knowledge_ids),
+        )
+    )
+    if relation_updated_at and relation_updated_at > latest:
+        latest = relation_updated_at
+    return latest
+
+
+def _kb_status(session: Session, kb: KnowledgeBase) -> str:
+    if kb.status == "offline":
+        return "offline"
+    if kb.status == "published" and _has_pending_content(session, kb):
+        return "pending"
+    return kb.status
+
+
 def _kb_response(session: Session, kb: KnowledgeBase) -> dict[str, Any]:
     edition = session.get(TextbookEdition, kb.textbook_edition_id)
     mapping_count = (
@@ -148,10 +265,11 @@ def _kb_response(session: Session, kb: KnowledgeBase) -> dict[str, Any]:
         "subjectName": SUBJECT_LABELS.get(kb.subject, kb.subject),
         "textbookEditionCode": edition.edition_code if edition else None,
         "textbookEditionName": edition.edition_name if edition else None,
-        "status": kb.status,
+        "status": _kb_status(session, kb),
         "currentReleaseVersion": release.version_label if release else None,
+        "recentPublishedAt": utc_isoformat(release.published_at) if release else None,
         "knowledgeCount": mapping_count,
-        "updatedAt": utc_isoformat(kb.updated_at),
+        "updatedAt": utc_isoformat(_latest_change_time(session, kb)),
         "rowVersion": kb.row_version,
     }
 
@@ -214,15 +332,21 @@ def list_knowledge_bases(
         statement = statement.where(KnowledgeBase.grade_term == grade_term)
     if subject:
         statement = statement.where(KnowledgeBase.subject == subject)
-    if status:
-        statement = statement.where(KnowledgeBase.status == status)
     if edition_code:
         statement = statement.join(TextbookEdition).where(
             TextbookEdition.edition_code == edition_code
         )
-    total, rows = _page(
-        session, statement.order_by(KnowledgeBase.id.desc()), page_num, page_size
-    )
+    if status:
+        # ponytail: V1 counts are small; calculate the derived status in one pass.
+        all_rows = list(session.scalars(statement.order_by(KnowledgeBase.id.desc())))
+        rows = [row for row in all_rows if _kb_status(session, row) == status]
+        total = len(rows)
+        start = (page_num - 1) * page_size
+        rows = rows[start : start + page_size]
+    else:
+        total, rows = _page(
+            session, statement.order_by(KnowledgeBase.id.desc()), page_num, page_size
+        )
     return total, [_kb_response(session, row) for row in rows]
 
 
@@ -233,6 +357,8 @@ def update_knowledge_base(
     _check_version(kb.row_version, data.row_version)
     before = _kb_response(session, kb)
     if data.name is not None:
+        if data.name != kb.name and kb.current_release_id and kb.status == "published":
+            kb.status = "pending"
         kb.name = data.name
     kb.row_version += 1
     kb.updated_by = actor

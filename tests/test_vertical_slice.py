@@ -210,6 +210,10 @@ def test_edit_creates_pending_revision_until_next_release(client):
     )
     assert edited["status"] == "pending"
     assert edited["latestFormal"]["knowledgeName"] == "100以内数数"
+    pending_kb = call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")
+    assert pending_kb["status"] == "pending"
+    assert pending_kb["recentPublishedAt"] == first["publishedAt"]
+    assert pending_kb["updatedAt"] > pending_kb["recentPublishedAt"]
     path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
     old = client.get(path, headers=open_headers(client, path)).json()["data"]
     assert old["knowledge"][0]["knowledgeName"] == "100以内数数"
@@ -223,6 +227,8 @@ def test_edit_creates_pending_revision_until_next_release(client):
     assert diff["baseReleaseVersion"] == first["releaseVersion"]
     assert diff["changed"] is True
     assert diff["summary"]["knowledge"]["modified"] == 1
+    published_kb = call(client, "GET", f"/api/v1/admin/knowledge-bases/{kb['id']}")
+    assert published_kb["recentPublishedAt"] == second["publishedAt"]
     current = call(client, "GET", "/api/v1/admin/knowledge/10000001")
     assert current["status"] == "published"
     assert (
