@@ -215,6 +215,14 @@ def test_edit_creates_pending_revision_until_next_release(client):
     assert old["knowledge"][0]["knowledgeName"] == "100以内数数"
     second = publish(client, kb["id"])
     assert second["versionNo"] == first["versionNo"] + 1
+    diff = call(
+        client,
+        "GET",
+        f"/api/v1/admin/knowledge-bases/{kb['id']}/releases/{second['releaseVersion']}/diff",
+    )
+    assert diff["baseReleaseVersion"] == first["releaseVersion"]
+    assert diff["changed"] is True
+    assert diff["summary"]["knowledge"]["modified"] == 1
     current = call(client, "GET", "/api/v1/admin/knowledge/10000001")
     assert current["status"] == "published"
     assert (

@@ -18,7 +18,7 @@ from app.models import (
     ReleaseVersion,
     TextbookEdition,
 )
-from app.models.base import utc_now
+from app.models.base import utc_isoformat, utc_now
 from app.schemas.catalog import (
     GRADE_TERM_LABELS,
     SUBJECT_LABELS,
@@ -151,7 +151,7 @@ def _kb_response(session: Session, kb: KnowledgeBase) -> dict[str, Any]:
         "status": kb.status,
         "currentReleaseVersion": release.version_label if release else None,
         "knowledgeCount": mapping_count,
-        "updatedAt": kb.updated_at.isoformat(),
+        "updatedAt": utc_isoformat(kb.updated_at),
         "rowVersion": kb.row_version,
     }
 

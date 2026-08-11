@@ -8,6 +8,13 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def utc_isoformat(value: datetime) -> str:
+    """Serialize stored UTC datetimes as unambiguous ISO 8601 timestamps."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 class Base(DeclarativeBase):
     pass
 

@@ -26,7 +26,7 @@ from app.models import (
     ReleaseRelation,
     ReleaseVersion,
 )
-from app.models.base import utc_now
+from app.models.base import utc_isoformat, utc_now
 
 
 def _hash(value: Any) -> str:
@@ -240,7 +240,7 @@ def release_response(release: ReleaseVersion) -> dict[str, Any]:
         "releaseType": release.release_type,
         "contentHash": release.content_hash,
         "publishedBy": release.published_by,
-        "publishedAt": release.published_at.isoformat(),
+        "publishedAt": utc_isoformat(release.published_at),
         "reason": release.reason,
     }
 
@@ -497,7 +497,7 @@ def list_audit_logs(session: Session, page_num: int = 1, page_size: int = 10):
             "resourceType": row.entity_type,
             "resourceId": row.entity_key,
             "requestId": row.request_id,
-            "createdAt": row.created_at.isoformat(),
+            "createdAt": utc_isoformat(row.created_at),
         }
         for row in rows
     ]
