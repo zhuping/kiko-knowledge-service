@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -35,28 +36,80 @@ ROLE_PERMISSIONS = {
     ),
 }
 
+ADMIN_USERNAME = "无问"
+ADMIN_PASSWORD = "Kiko123!@#"
+ADMIN_SESSION_COOKIE = "kiko_admin_session"
+ADMIN_SESSION_MAX_AGE = 8 * 60 * 60
+
+
+def identity_response(identity: AdminIdentity) -> dict:
+    return {
+        "userId": identity.user_id,
+        "displayName": identity.display_name,
+        "roles": list(identity.roles),
+        "permissions": [
+            "knowledge:read",
+            "knowledge:write",
+            "mapping:write",
+            "relation:write",
+            "release:write",
+            "audit:read",
+        ],
+    }
+
+
+def authenticate_admin(
+    request: Request, username: str, password: str
+) -> tuple[AdminIdentity, str]:
+    settings: Settings = request.app.state.settings
+    if not settings.local_admin_enabled:
+        raise BusinessError("AUTH_FAILED", "本地管理员登录已关闭", 401)
+    if not (
+        hmac.compare_digest(username.encode(), ADMIN_USERNAME.encode())
+        and hmac.compare_digest(password.encode(), ADMIN_PASSWORD.encode())
+    ):
+        raise BusinessError("AUTH_FAILED", "账号或密码错误", 401)
+
+    now = time.time()
+    sessions = request.app.state.admin_sessions
+    for token, expires_at in list(sessions.items()):
+        if expires_at <= now:
+            sessions.pop(token, None)
+    token = secrets.token_urlsafe(32)
+    sessions[token] = now + ADMIN_SESSION_MAX_AGE
+    return (
+        AdminIdentity(
+            user_id=ADMIN_USERNAME,
+            display_name="知识运营管理员",
+            roles=("admin",),
+        ),
+        token,
+    )
+
+
+def revoke_admin_session(request: Request) -> None:
+    token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    if token:
+        request.app.state.admin_sessions.pop(token, None)
+
 
 def admin_identity(request: Request) -> AdminIdentity:
-    settings: Settings = request.app.state.settings
-    if not (settings.local_admin_enabled and settings.environment == "development"):
-        raise BusinessError("AUTH_FAILED", "管理端需要 SSO/OIDC 身份", 401)
-    roles = tuple(
-        role.strip()
-        for role in request.headers.get("X-Admin-Roles", "admin").split(",")
-        if role.strip() == "admin"
-    )
-    if roles != ("admin",):
-        raise BusinessError("FORBIDDEN", "当前版本仅支持管理员身份", 403)
+    token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    expires_at = request.app.state.admin_sessions.get(token) if token else None
+    if expires_at is None or expires_at <= time.time():
+        if token:
+            request.app.state.admin_sessions.pop(token, None)
+        raise BusinessError("AUTH_FAILED", "登录已失效，请重新登录", 401)
     return AdminIdentity(
-        user_id=request.headers.get("X-Admin-User", "local-admin"),
-        display_name=request.headers.get("X-Admin-Name", "本地管理员"),
-        roles=roles,
+        user_id=ADMIN_USERNAME,
+        display_name="知识运营管理员",
+        roles=("admin",),
     )
 
 
 def require_admin(request: Request) -> str:
     identity = admin_identity(request)
-    return request.headers.get("X-Admin-Actor", identity.user_id)
+    return identity.user_id
 
 
 def require_roles(*required: str):

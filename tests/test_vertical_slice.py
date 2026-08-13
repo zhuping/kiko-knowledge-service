@@ -381,7 +381,14 @@ def test_import_uses_current_excel_fields_and_creates_prerequisite(client):
     ]
 
 
-def test_v1_admin_identity_is_admin_only(client):
-    response = client.get("/api/v1/admin/me", headers={"X-Admin-Roles": "editor"})
-    assert response.status_code == 403
+def test_v1_admin_identity_requires_the_login_session(client):
+    client.cookies.clear()
+    response = client.get("/api/v1/admin/me", headers={"X-Admin-Roles": "admin"})
+    assert response.status_code == 401
+
+    login = client.post(
+        "/api/v1/admin/login",
+        json={"username": "无问", "password": "Kiko123!@#"},
+    )
+    assert login.status_code == 200
     assert client.get("/api/v1/admin/me").json()["data"]["roles"] == ["admin"]

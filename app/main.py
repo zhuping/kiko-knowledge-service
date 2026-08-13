@@ -30,6 +30,8 @@ def create_app(database_url: str | None = None, create_schema: bool = False) -> 
     app = FastAPI(title="Kiko Knowledge Service", version="1.0.0")
     app.state.settings = settings
     app.state.engine = engine
+    # ponytail: process-local sessions; use a shared store for multiple workers
+    app.state.admin_sessions = {}
     app.state.session_factory = sessionmaker(
         bind=engine, autoflush=False, expire_on_commit=False
     )

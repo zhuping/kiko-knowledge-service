@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.response import success
-from app.core.security import AdminIdentity, admin_identity, require_admin
+from app.core.security import (
+    ADMIN_SESSION_COOKIE,
+    ADMIN_SESSION_MAX_AGE,
+    AdminIdentity,
+    admin_identity,
+    authenticate_admin,
+    identity_response,
+    require_admin,
+    revoke_admin_session,
+)
 from app.models import KnowledgeObject, RelationRevision
 from app.modules.catalog.service import (
     catalog_tree,
@@ -38,6 +47,7 @@ from app.modules.relation.service import (
     relation_group_response,
     revert_relation,
 )
+from app.schemas.auth import AdminLoginRequest
 from app.schemas.catalog import (
     KnowledgeBaseCreate,
     KnowledgeBaseStatus,
@@ -69,22 +79,29 @@ def _page(total: int, page_num: int, page_size: int, rows: list) -> dict:
 
 @router.get("/me")
 def current_user(request: Request, identity: AdminIdentity = Depends(admin_identity)):
-    return success(
-        {
-            "userId": identity.user_id,
-            "displayName": identity.display_name,
-            "roles": ["admin"],
-            "permissions": [
-                "knowledge:read",
-                "knowledge:write",
-                "mapping:write",
-                "relation:write",
-                "release:write",
-                "audit:read",
-            ],
-        },
-        _request_id(request),
+    return success(identity_response(identity), _request_id(request))
+
+
+@router.post("/login")
+def login(payload: AdminLoginRequest, request: Request, response: Response):
+    identity, token = authenticate_admin(request, payload.username, payload.password)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        token,
+        max_age=ADMIN_SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=request.app.state.settings.environment != "development",
+        path="/",
     )
+    return success(identity_response(identity), _request_id(request))
+
+
+@router.post("/logout")
+def logout(request: Request, response: Response):
+    revoke_admin_session(request)
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return success({"loggedOut": True}, _request_id(request))
 
 
 @router.get("/knowledge-bases")
