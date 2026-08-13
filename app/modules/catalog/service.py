@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import BusinessError
@@ -134,9 +134,11 @@ def _has_pending_content(session: Session, kb: KnowledgeBase) -> bool:
         return False
     release_mappings = set(
         session.execute(
-            select(ReleaseMapping.catalog_node_id, ReleaseMapping.knowledge_id).where(
-                ReleaseMapping.release_id == kb.current_release_id
-            )
+            select(
+                ReleaseMapping.catalog_node_id,
+                ReleaseMapping.knowledge_id,
+                ReleaseMapping.sort_order,
+            ).where(ReleaseMapping.release_id == kb.current_release_id)
         ).all()
     )
     draft_mappings = set(
@@ -144,13 +146,14 @@ def _has_pending_content(session: Session, kb: KnowledgeBase) -> bool:
             select(
                 KnowledgeBaseMapping.catalog_node_id,
                 KnowledgeBaseMapping.knowledge_id,
+                KnowledgeBaseMapping.sort_order,
             ).where(KnowledgeBaseMapping.knowledge_base_id == kb.id)
         ).all()
     )
     if draft_mappings != release_mappings:
         return True
 
-    knowledge_ids = {knowledge_id for _, knowledge_id in draft_mappings}
+    knowledge_ids = {knowledge_id for _, knowledge_id, _ in draft_mappings}
     formal_revisions = dict(
         session.execute(
             select(ReleaseKnowledge.knowledge_id, ReleaseKnowledge.revision_id).where(
@@ -179,8 +182,19 @@ def _has_pending_content(session: Session, kb: KnowledgeBase) -> bool:
             )
             .where(
                 RelationRevision.operation == "upsert",
-                RelationRevision.from_knowledge_id.in_(knowledge_ids),
-                RelationRevision.to_knowledge_id.in_(knowledge_ids),
+                or_(
+                    and_(
+                        RelationRevision.relation_type == "prerequisite",
+                        RelationRevision.to_knowledge_id.in_(knowledge_ids),
+                    ),
+                    and_(
+                        RelationRevision.relation_type.in_(("parallel", "cross")),
+                        or_(
+                            RelationRevision.from_knowledge_id.in_(knowledge_ids),
+                            RelationRevision.to_knowledge_id.in_(knowledge_ids),
+                        ),
+                    ),
+                ),
             )
         ).all()
     )
@@ -224,8 +238,10 @@ def _latest_change_time(session: Session, kb: KnowledgeBase):
             RelationRevision.id == KnowledgeRelation.latest_revision_id,
         )
         .where(
-            RelationRevision.from_knowledge_id.in_(knowledge_ids),
-            RelationRevision.to_knowledge_id.in_(knowledge_ids),
+            or_(
+                RelationRevision.from_knowledge_id.in_(knowledge_ids),
+                RelationRevision.to_knowledge_id.in_(knowledge_ids),
+            )
         )
     )
     if relation_updated_at and relation_updated_at > latest:
@@ -348,6 +364,61 @@ def list_knowledge_bases(
             session, statement.order_by(KnowledgeBase.id.desc()), page_num, page_size
         )
     return total, [_kb_response(session, row) for row in rows]
+
+
+def list_open_knowledge_bases(
+    session: Session,
+    grade_term: str | None = None,
+    subject: str | None = None,
+    edition_code: str | None = None,
+) -> list[dict[str, Any]]:
+    statement = select(KnowledgeBase).where(
+        KnowledgeBase.current_release_id.is_not(None),
+        KnowledgeBase.status != "offline",
+    )
+    if grade_term:
+        statement = statement.where(KnowledgeBase.grade_term == grade_term)
+    if subject:
+        statement = statement.where(KnowledgeBase.subject == subject)
+    if edition_code:
+        statement = statement.join(TextbookEdition).where(
+            TextbookEdition.edition_code == edition_code
+        )
+    rows = session.scalars(statement.order_by(KnowledgeBase.id)).all()
+    result = []
+    for kb in rows:
+        release = session.get(ReleaseVersion, kb.current_release_id)
+        if release is None:
+            continue
+        mapping_count = (
+            session.scalar(
+                select(func.count())
+                .select_from(ReleaseMapping)
+                .where(ReleaseMapping.release_id == release.id)
+            )
+            or 0
+        )
+        result.append(
+            {
+                "id": str(kb.id),
+                "name": release.knowledge_base_name,
+                "gradeTermCode": release.grade_term,
+                "gradeTermName": GRADE_TERM_LABELS.get(
+                    release.grade_term, release.grade_term
+                ),
+                "subjectCode": release.subject,
+                "subjectName": SUBJECT_LABELS.get(release.subject, release.subject),
+                "textbookEditionCode": release.textbook_edition_code,
+                "textbookEditionName": release.textbook_edition_name,
+                "status": "published",
+                "currentReleaseVersion": release.version_label,
+                "recentPublishedAt": utc_isoformat(release.published_at),
+                "knowledgeCount": mapping_count,
+                "updatedAt": utc_isoformat(release.published_at),
+                "rowVersion": kb.row_version,
+            }
+        )
+    return result
 
 
 def update_knowledge_base(
@@ -487,6 +558,7 @@ def _mapping_response(
         "mappingId": str(mapping.id),
         "catalogNodeId": str(node.id),
         "catalogNodeTitle": node.title,
+        "sortOrder": mapping.sort_order,
         **{
             key: item[key]
             for key in (
@@ -517,7 +589,13 @@ def list_mappings(
         )
     return [
         _mapping_response(session, row)
-        for row in session.scalars(statement.order_by(KnowledgeBaseMapping.id))
+        for row in session.scalars(
+            statement.order_by(
+                KnowledgeBaseMapping.catalog_node_id,
+                KnowledgeBaseMapping.sort_order,
+                KnowledgeBaseMapping.id,
+            )
+        )
     ]
 
 
@@ -542,10 +620,20 @@ def create_mapping(
         )
     ):
         raise BusinessError("CONFLICT", "该知识点已经关联到当前目录", 409)
+    sort_order = (
+        session.scalar(
+            select(func.max(KnowledgeBaseMapping.sort_order)).where(
+                KnowledgeBaseMapping.knowledge_base_id == kb_id,
+                KnowledgeBaseMapping.catalog_node_id == node.id,
+            )
+        )
+        or 0
+    ) + 1
     mapping = KnowledgeBaseMapping(
         knowledge_base_id=kb_id,
         catalog_node_id=node.id,
         knowledge_id=knowledge.id,
+        sort_order=sort_order,
         created_by=actor,
     )
     session.add(mapping)

@@ -7,7 +7,7 @@ from app.core.db import get_db
 from app.core.errors import BusinessError
 from app.core.response import success
 from app.core.security import verify_open_request
-from app.modules.catalog.service import list_knowledge_bases
+from app.modules.catalog.service import list_open_knowledge_bases
 from app.modules.release.document import release_document
 from app.modules.release.service import get_release
 
@@ -37,17 +37,14 @@ def open_knowledge_bases(
     db: Session = Depends(get_db),
     _client=Depends(verify_open_request),
 ):
-    total, rows = list_knowledge_bases(
+    rows = list_open_knowledge_bases(
         db,
         grade_term_code,
         subject_code,
         textbook_edition_code,
-        "published",
-        1,
-        100,
     )
     return success(
-        {"total": total, "list": rows},
+        {"total": len(rows), "list": rows},
         request.state.request_id,
     )
 

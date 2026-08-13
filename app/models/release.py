@@ -45,6 +45,11 @@ class ReleaseVersion(TimestampMixin, Base):
     release_type: Mapped[str] = mapped_column(
         String(20), default="normal", nullable=False
     )
+    knowledge_base_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    grade_term: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject: Mapped[str] = mapped_column(String(50), nullable=False)
+    textbook_edition_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    textbook_edition_name: Mapped[str] = mapped_column(String(200), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     published_by: Mapped[str] = mapped_column(String(128), nullable=False)
     published_at: Mapped[datetime] = mapped_column(nullable=False)
@@ -94,8 +99,20 @@ class ReleaseMapping(Base):
     catalog_node_id: Mapped[int] = mapped_column(Integer, nullable=False)
     knowledge_id: Mapped[int] = mapped_column(Integer, nullable=False)
     canonical_id: Mapped[str] = mapped_column(String(8), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
     __table_args__ = (
-        UniqueConstraint("release_id", "catalog_node_id", "knowledge_id"),
+        UniqueConstraint(
+            "release_id",
+            "catalog_node_id",
+            "knowledge_id",
+            name="uq_release_mapping_knowledge",
+        ),
+        UniqueConstraint(
+            "release_id",
+            "catalog_node_id",
+            "sort_order",
+            name="uq_release_mapping_order",
+        ),
     )
 
 

@@ -65,13 +65,22 @@ def upgrade() -> None:
         ("release_relation", "from_canonical_id"),
         ("release_relation", "to_canonical_id"),
     ):
-        op.alter_column(
-            table,
-            column,
-            existing_type=String(128),
-            type_=String(8),
-            existing_nullable=False,
-        )
+        if op.get_bind().dialect.name == "sqlite":
+            with op.batch_alter_table(table) as batch:
+                batch.alter_column(
+                    column,
+                    existing_type=String(128),
+                    type_=String(8),
+                    existing_nullable=False,
+                )
+        else:
+            op.alter_column(
+                table,
+                column,
+                existing_type=String(128),
+                type_=String(8),
+                existing_nullable=False,
+            )
 
 
 def downgrade() -> None:
@@ -82,10 +91,19 @@ def downgrade() -> None:
         ("release_relation", "from_canonical_id"),
         ("release_relation", "to_canonical_id"),
     ):
-        op.alter_column(
-            table,
-            column,
-            existing_type=String(8),
-            type_=String(128),
-            existing_nullable=False,
-        )
+        if op.get_bind().dialect.name == "sqlite":
+            with op.batch_alter_table(table) as batch:
+                batch.alter_column(
+                    column,
+                    existing_type=String(8),
+                    type_=String(128),
+                    existing_nullable=False,
+                )
+        else:
+            op.alter_column(
+                table,
+                column,
+                existing_type=String(8),
+                type_=String(128),
+                existing_nullable=False,
+            )

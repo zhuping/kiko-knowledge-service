@@ -108,9 +108,21 @@ class KnowledgeBaseMapping(TimestampMixin, Base):
     knowledge_id: Mapped[int] = mapped_column(
         ForeignKey("knowledge_object.id"), nullable=False
     )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
     created_by: Mapped[str] = mapped_column(String(128), nullable=False)
     __table_args__ = (
-        UniqueConstraint("knowledge_base_id", "catalog_node_id", "knowledge_id"),
+        UniqueConstraint(
+            "knowledge_base_id",
+            "catalog_node_id",
+            "knowledge_id",
+            name="uq_kb_mapping_knowledge",
+        ),
+        UniqueConstraint(
+            "knowledge_base_id",
+            "catalog_node_id",
+            "sort_order",
+            name="uq_kb_mapping_order",
+        ),
         Index("ix_kb_mapping_node", "knowledge_base_id", "catalog_node_id"),
     )
 

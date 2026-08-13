@@ -176,8 +176,14 @@ def test_publish_snapshot_and_point_revision(client):
     path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
     response = client.get(path, headers=open_headers(client, path))
     assert response.status_code == 200
+    data = response.json()["data"]
     assert response.json()["meta"]["releaseVersion"] == release["releaseVersion"]
-    assert len(response.json()["data"]["knowledge"]) == 2
+    assert data["knowledgeBaseName"] == "人教版2024数学一年级上册"
+    assert data["gradeTermCode"] == "g1_t1"
+    assert data["subjectCode"] == "math"
+    assert data["contentHash"] == release["contentHash"]
+    assert [mapping["sortOrder"] for mapping in data["mappings"]] == [1, 2]
+    assert len(data["knowledge"]) == 2
 
 
 def test_create_knowledge_generates_numeric_id(client):
@@ -214,6 +220,13 @@ def test_edit_creates_pending_revision_until_next_release(client):
     assert pending_kb["status"] == "pending"
     assert pending_kb["recentPublishedAt"] == first["publishedAt"]
     assert pending_kb["updatedAt"] > pending_kb["recentPublishedAt"]
+    list_path = "/api/v1/open/knowledge-bases"
+    open_list = client.get(list_path, headers=open_headers(client, list_path)).json()[
+        "data"
+    ]
+    assert [item["id"] for item in open_list["list"]] == [kb["id"]]
+    assert open_list["list"][0]["name"] == "人教版2024数学一年级上册"
+    assert open_list["list"][0]["status"] == "published"
     path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
     old = client.get(path, headers=open_headers(client, path)).json()["data"]
     assert old["knowledge"][0]["knowledgeName"] == "100以内数数"
@@ -248,6 +261,34 @@ def test_edit_creates_pending_revision_until_next_release(client):
         ]
         == rolled_back["releaseVersion"]
     )
+
+
+def test_release_includes_external_prerequisite(client):
+    kb, node_id = seed_catalog(client)
+    create_point(client, "10000001", "前置知识点")
+    create_point(client, "10000002", "当前知识点")
+    map_point(client, kb, node_id, "10000002")
+    call(
+        client,
+        "POST",
+        "/api/v1/admin/relations",
+        {
+            "canonicalId": "10000002",
+            "prerequisiteCanonicalIds": ["10000001"],
+        },
+    )
+    release = publish(client, kb["id"])
+    path = f"/api/v1/open/knowledge-bases/{kb['id']}/content"
+    data = client.get(path, headers=open_headers(client, path)).json()["data"]
+    assert data["releaseVersion"] == release["releaseVersion"]
+    assert data["relations"] == [
+        {
+            "relationType": "prerequisite",
+            "fromCanonicalId": "10000001",
+            "toCanonicalId": "10000002",
+            "note": None,
+        }
+    ]
 
 
 def test_relation_draft_can_be_reverted(client):

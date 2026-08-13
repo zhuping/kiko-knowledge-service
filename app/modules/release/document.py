@@ -7,14 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    KnowledgeBase,
     KnowledgeRevision,
     ReleaseCatalogNode,
     ReleaseKnowledge,
     ReleaseMapping,
     ReleaseRelation,
     ReleaseVersion,
-    TextbookEdition,
 )
 
 
@@ -55,14 +53,11 @@ def _tree_from_release(
 
 
 def release_document(session: Session, release: ReleaseVersion) -> dict:
-    root_title = session.scalar(
-        select(TextbookEdition.edition_name)
-        .join(KnowledgeBase, KnowledgeBase.textbook_edition_id == TextbookEdition.id)
-        .where(KnowledgeBase.id == release.knowledge_base_id)
-    )
     knowledge = []
     for row in session.scalars(
-        select(ReleaseKnowledge).where(ReleaseKnowledge.release_id == release.id)
+        select(ReleaseKnowledge)
+        .where(ReleaseKnowledge.release_id == release.id)
+        .order_by(ReleaseKnowledge.id)
     ):
         revision = session.get(KnowledgeRevision, row.revision_id)
         if revision:
@@ -81,9 +76,16 @@ def release_document(session: Session, release: ReleaseVersion) -> dict:
         {
             "catalogNodeId": str(row.catalog_node_id),
             "canonicalId": row.canonical_id,
+            "sortOrder": row.sort_order,
         }
         for row in session.scalars(
-            select(ReleaseMapping).where(ReleaseMapping.release_id == release.id)
+            select(ReleaseMapping)
+            .where(ReleaseMapping.release_id == release.id)
+            .order_by(
+                ReleaseMapping.catalog_node_id,
+                ReleaseMapping.sort_order,
+                ReleaseMapping.id,
+            )
         )
     ]
     relations = [
@@ -94,13 +96,28 @@ def release_document(session: Session, release: ReleaseVersion) -> dict:
             "note": row.note,
         }
         for row in session.scalars(
-            select(ReleaseRelation).where(ReleaseRelation.release_id == release.id)
+            select(ReleaseRelation)
+            .where(ReleaseRelation.release_id == release.id)
+            .order_by(
+                ReleaseRelation.relation_type,
+                ReleaseRelation.from_canonical_id,
+                ReleaseRelation.to_canonical_id,
+                ReleaseRelation.id,
+            )
         )
     ]
     return {
         "knowledgeBaseId": str(release.knowledge_base_id),
+        "knowledgeBaseName": release.knowledge_base_name,
         "releaseVersion": release.version_label,
-        "catalog": _tree_from_release(session, release.id, root_title),
+        "contentHash": release.content_hash,
+        "gradeTermCode": release.grade_term,
+        "subjectCode": release.subject,
+        "textbookEditionCode": release.textbook_edition_code,
+        "textbookEditionName": release.textbook_edition_name,
+        "catalog": _tree_from_release(
+            session, release.id, release.textbook_edition_name
+        ),
         "knowledge": knowledge,
         "mappings": mappings,
         "relations": relations,

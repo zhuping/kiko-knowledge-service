@@ -25,6 +25,7 @@ from app.models import (
     ReleaseMapping,
     ReleaseRelation,
     ReleaseVersion,
+    TextbookEdition,
 )
 from app.models.base import utc_isoformat, utc_now
 
@@ -114,7 +115,11 @@ def _candidate(session: Session, kb_id: int):
         session.scalars(
             select(KnowledgeBaseMapping)
             .where(KnowledgeBaseMapping.knowledge_base_id == kb_id)
-            .order_by(KnowledgeBaseMapping.id)
+            .order_by(
+                KnowledgeBaseMapping.catalog_node_id,
+                KnowledgeBaseMapping.sort_order,
+                KnowledgeBaseMapping.id,
+            )
         )
     )
     knowledge_ids = {row.knowledge_id for row in mappings}
@@ -132,6 +137,8 @@ def _candidate(session: Session, kb_id: int):
     node_ids = {row.id for row in nodes}
     for mapping in mappings:
         item = by_id.get(mapping.knowledge_id)
+        if mapping.sort_order < 1:
+            errors.append({"entity": mapping.id, "reason": "映射顺序必须大于 0"})
         if item is None:
             errors.append({"entity": mapping.id, "reason": "映射引用的知识点不存在"})
         else:
@@ -143,10 +150,18 @@ def _candidate(session: Session, kb_id: int):
     relations = []
     for relation in session.scalars(select(KnowledgeRelation)):
         revision = _relation_revision(session, relation)
-        if (
-            revision.operation == "upsert"
-            and revision.from_knowledge_id in knowledge_ids
-            and revision.to_knowledge_id in knowledge_ids
+        if revision.operation == "upsert" and (
+            (
+                revision.relation_type == "prerequisite"
+                and revision.to_knowledge_id in knowledge_ids
+            )
+            or (
+                revision.relation_type in {"parallel", "cross"}
+                and (
+                    revision.from_knowledge_id in knowledge_ids
+                    or revision.to_knowledge_id in knowledge_ids
+                )
+            )
         ):
             relations.append(revision)
     return kb, nodes, mappings, knowledge, relations
@@ -203,6 +218,7 @@ def _copy_snapshots(
                 catalog_node_id=mapping.catalog_node_id,
                 knowledge_id=item.id,
                 canonical_id=item.canonical_id,
+                sort_order=mapping.sort_order,
             )
         )
     for item in knowledge:
@@ -252,6 +268,9 @@ def publish_knowledge_base(
     if errors:
         raise BusinessError("VALIDATION_FAILED", "发布校验未通过", 422, errors)
     kb, nodes, mappings, knowledge, relations = _candidate(session, kb_id)
+    edition = session.get(TextbookEdition, kb.textbook_edition_id)
+    if edition is None:
+        raise BusinessError("VALIDATION_FAILED", "知识库缺少有效教材版本", 422)
     base = (
         session.get(ReleaseVersion, kb.current_release_id)
         if kb.current_release_id
@@ -280,6 +299,11 @@ def publish_knowledge_base(
         base_release_id=base.id if base else None,
         batch_id=batch.id,
         release_type="normal",
+        knowledge_base_name=kb.name,
+        grade_term=kb.grade_term,
+        subject=kb.subject,
+        textbook_edition_code=edition.edition_code,
+        textbook_edition_name=edition.edition_name,
         content_hash="pending",
         published_by=actor,
         published_at=now,
@@ -290,10 +314,37 @@ def publish_knowledge_base(
     _copy_snapshots(session, release, nodes, mappings, knowledge, relations)
     release.content_hash = _hash(
         {
-            "nodes": [row.id for row in nodes],
-            "mappings": [(row.catalog_node_id, row.knowledge_id) for row in mappings],
-            "knowledge": [row.id for row in knowledge],
-            "relations": [row.relation_id for row in relations],
+            "metadata": [
+                kb.name,
+                kb.grade_term,
+                kb.subject,
+                edition.edition_code,
+                edition.edition_name,
+            ],
+            "nodes": sorted(
+                (
+                    row.id,
+                    row.parent_id,
+                    row.level,
+                    row.node_type,
+                    row.source_key,
+                    row.title,
+                    row.source_path,
+                    row.sort_order,
+                )
+                for row in nodes
+            ),
+            "mappings": sorted(
+                (row.catalog_node_id, row.knowledge_id, row.sort_order)
+                for row in mappings
+            ),
+            "knowledge": sorted(
+                (row.id, _current_revision(session, row).content_hash)
+                for row in knowledge
+            ),
+            "relations": sorted(
+                (row.relation_id, row.content_hash) for row in relations
+            ),
         }
     )
     current = session.get(ReleaseCurrent, kb_id)
@@ -388,6 +439,7 @@ def _copy_release_rows(
                 catalog_node_id=row.catalog_node_id,
                 knowledge_id=row.knowledge_id,
                 canonical_id=row.canonical_id,
+                sort_order=row.sort_order,
             )
         )
     for row in session.scalars(
@@ -451,6 +503,11 @@ def rollback_knowledge_base(
         base_release_id=kb.current_release_id,
         batch_id=batch.id,
         release_type="rollback",
+        knowledge_base_name=source.knowledge_base_name,
+        grade_term=source.grade_term,
+        subject=source.subject,
+        textbook_edition_code=source.textbook_edition_code,
+        textbook_edition_name=source.textbook_edition_name,
         content_hash=source.content_hash,
         published_by=actor,
         published_at=now,
